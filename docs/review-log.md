@@ -11,3 +11,11 @@ Atomic checkpoints for the first developer preview:
 The final presentation and CI checkpoint adds the generated concept artwork, user/developer guides, platform matrix, wheel-content check, and this evidence ledger. Independent review checked action pins, local documentation links, compatibility claims, and targeted private-path/credential scans before publication. The live trial is recorded in [verification](verification.md).
 
 GitHub Actions results are the authority for the remote platform matrix. A local green result does not imply another platform passed. No review proves absence of all defects.
+
+## Follow-up adversarial fixes
+
+- `363cc5e`: explicit-off routing/status and safe configured Jev metadata; 36 policy tests, independent plugin gate.
+- `f731127`: safe cache-preserving reinstall and recovery; 38 installer tests, independent gate and strengthened built-wheel smoke.
+- `53862fa`: generic host manual precedence, deferred reasoning persistence, and accurate UI ownership; 53 clean-checkout lifecycle tests and 14 UI tests, independent host/UI gate.
+
+See [verification](verification.md#follow-up-adversarial-evaluation) for defects and evidence. New CI steps run the UI regressions against the exported public patch.

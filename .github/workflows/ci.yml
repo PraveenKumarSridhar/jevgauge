@@ -62,3 +62,11 @@ jobs:
           python -m pip install '.[test]'
           python -m build
           python scripts/smoke_install.py --wheel dist/jevgauge-0.1.0-py3-none-any.whl --hermes-repo ../hermes
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Desktop route display regressions
+        working-directory: hermes
+        run: |
+          npm ci
+          npm run test:ui --workspace hermes -- src/app/chat/session-route-panel.test.tsx src/app/session/hooks/use-message-stream/utils.test.ts

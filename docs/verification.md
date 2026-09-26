@@ -58,6 +58,21 @@ Desktop displayed `Copper Rain Over Neon Towers`, `MANUAL`, and `RESUMED`. Both 
 
 Final local package suite: **54 passed**. Clean pinned Hermes checkout with the exported patch: **48 passed across eight canonical test files**. Independent host review also ran four files: **27 passed**. These overlapping host runs are not added together as unique tests. Built-wheel smoke passed outside the source tree in a fresh environment, including unsupported-stock refusal.
 
+## Follow-up adversarial evaluation
+
+A second independent review on 2026-09-25 found defects beyond the initial green suite. Failing regressions were added before fixes:
+
+- Import-created Python caches blocked uninstall/reinstall. Retained ownership records now preserve caches and user files while allowing safe reinstall and interrupted-operation retry. Same-size upgrades execute the new code.
+- Explicit reasoning off was treated as an absent effort. Policy and host now normalize it to `none`, validate compatibility, and report it accurately.
+- Unvalidated response model metadata could be persisted. Only the configured Jev model identifier is saved.
+- Provisional first-call fallback could undo a later manual choice. Manual changes now invalidate that rollback and restore normal Hermes fallback handling.
+- Deferred reasoning changes could lose to old resume overrides. The build inputs, saved runtime, and display update together.
+- Profile-owned reasoning after a model switch was mislabeled AUTO. The panel now honors DEFAULT ownership.
+
+Post-fix local evidence: **74 policy/installer tests**, **53 Hermes lifecycle tests across eight files on a clean patched checkout**, and **14 focused Desktop UI tests**, all passing. The rebuilt-wheel smoke imports the deployed plugin before testing uninstall/reinstall. Independent reviews approved each scoped fix before its commit. The CI workflow now includes the focused Desktop UI tests as well as the platform matrix and pinned lifecycle tests.
+
+The tested upstream pin `d0288be5b3330d2442e3907185b8e9d0958297bb` still matched upstream main when checked during this evaluation. That is a dated observation, not a promise of compatibility with future changes.
+
 ## Human acceptance checklist
 
 - New eligible chat: selecting state appears, then a valid pair before provider call.
