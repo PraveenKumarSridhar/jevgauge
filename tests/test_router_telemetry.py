@@ -65,3 +65,22 @@ def test_confidence_abstention_keeps_observed_eligibility(tmp_path, monkeypatch)
     row = EventStore(tmp_path / 'jevgauge/events.sqlite3').read_events()[0]
     assert row['eligible_models'] == [{'model':'gpt-6-sol','capability':2}]
     assert row['reason_code'] == 'low Jev confidence'
+
+
+@pytest.mark.parametrize('workers', [1, 8])
+def test_installed_plugin_reuses_its_stdlib_storage_module(tmp_path, monkeypatch, workers):
+    import builtins
+    original_import = builtins.__import__
+    def without_dashboard_package(name, *args, **kwargs):
+        if name == 'jevgauge.telemetry':
+            raise ImportError('separate Hermes interpreter')
+        return original_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', without_dashboard_package)
+    monkeypatch.setattr(router, '__file__', str(tmp_path / '__init__.py'))
+    (tmp_path / 'telemetry.py').write_text('import time\ntime.sleep(.05)\ncalls = 0\ndef record_event(home, event):\n    global calls\n    calls += 1\n    return calls\n')
+    # Fresh plugin instance emulates installed Hermes without the package import.
+    if hasattr(router, '_STORAGE_RECORD'):
+        monkeypatch.setattr(router, '_STORAGE_RECORD', None)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        assert sorted(pool.map(lambda _: router._record({}), range(16))) == list(range(1,17))

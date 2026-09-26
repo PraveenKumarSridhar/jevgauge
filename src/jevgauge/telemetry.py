@@ -12,9 +12,26 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+import threading
+import weakref
 
 SCHEMA_VERSION = 1
 MAX_EVENTS = 100000
+# A live operation keeps its lock referenced; idle paths disappear from the
+# registry. Canonical paths share a writer queue even across EventStore objects.
+_WRITER_LOCKS = weakref.WeakValueDictionary()
+_WRITER_LOCKS_GUARD = threading.Lock()
+
+
+def _writer_lock(path):
+    key = os.path.normcase(str(path.resolve()))
+    with _WRITER_LOCKS_GUARD:
+        lock = _WRITER_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WRITER_LOCKS[key] = lock
+        return lock
+
 TEXT_FIELDS = {'event_id', 'conversation_id', 'project', 'provider', 'policy_version',
     'reason_code', 'outcome', 'default_model', 'default_effort', 'selected_model',
     'requested_effort', 'model_tier', 'effort_tier', 'eligibility_source', 'attempt_id',
@@ -111,27 +128,37 @@ class EventStore:
                 db.execute('CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, payload TEXT NOT NULL)')
                 db.execute('CREATE INDEX IF NOT EXISTS events_time ON events(timestamp, event_id)')
                 db.execute('PRAGMA user_version=1')
-            db.commit()
+            # A new append owns this transaction through its insert. Do not
+            # release then reacquire SQLite's writer lock between schema and data.
+            if not create:
+                db.commit()
             return db
         except Exception:
             db.close()
             raise
 
-    def append(self, event):
+    def append(self, event, *, writer_timeout=5.0):
         normalized, payload = validate_event(event)
-        db = self._connect(create=True)
+        if type(writer_timeout) not in (int, float) or not 0 <= writer_timeout <= 30:
+            raise ValueError('Invalid writer timeout')
+        lock = _writer_lock(self.path)
+        if not lock.acquire(timeout=writer_timeout):
+            raise TimeoutError('Storage writer busy')
         try:
-            with db:
-                db.execute('BEGIN IMMEDIATE')
-                previous = db.execute('SELECT payload FROM events WHERE event_id=?', (normalized['event_id'],)).fetchone()
-                if previous:
-                    if previous[0] != payload:
-                        raise ValueError('Conflicting event identity')
-                    return False
-                db.execute('INSERT INTO events VALUES (?, ?, ?)', (normalized['event_id'], normalized['timestamp'], payload))
-            return True
+            db = self._connect(create=True)
+            try:
+                with db:
+                    previous = db.execute('SELECT payload FROM events WHERE event_id=?', (normalized['event_id'],)).fetchone()
+                    if previous:
+                        if previous[0] != payload:
+                            raise ValueError('Conflicting event identity')
+                        return False
+                    db.execute('INSERT INTO events VALUES (?, ?, ?)', (normalized['event_id'], normalized['timestamp'], payload))
+                return True
+            finally:
+                db.close()
         finally:
-            db.close()
+            lock.release()
 
     def read_events(self, limit=50000):
         if type(limit) is not int or not 1 <= limit <= MAX_EVENTS:
@@ -155,6 +182,6 @@ class EventStore:
 def record_event(home, event):
     """Fail open without logging potentially secret-bearing exception text."""
     try:
-        return EventStore(Path(home) / 'jevgauge' / 'events.sqlite3').append(event)
+        return EventStore(Path(home) / 'jevgauge' / 'events.sqlite3').append(event, writer_timeout=0.25)
     except Exception:
         return False

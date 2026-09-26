@@ -47,7 +47,9 @@ class DashboardServer(ThreadingHTTPServer):
 
 
 def _query(raw):
-    pairs = parse_qs(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=5)
+    # Python 3.10 strict parsing rejects the valid unfiltered empty query.
+    pairs = (parse_qs(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=5)
+             if raw else {})
     if set(pairs) - {'start', 'end', 'timezone', 'project'} or any(len(v) != 1 for v in pairs.values()):
         raise ValueError('Invalid filters.')
     values = {key: val[0] for key, val in pairs.items()}

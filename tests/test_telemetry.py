@@ -76,3 +76,41 @@ def test_attempt_partial_then_terminal_persist_separately(tmp_path):
     with pytest.raises(ValueError):
         store.append(event(3, usage={'input_tokens':10,'cached_input_tokens':0,'output_tokens':5,
             'reasoning_tokens':6,'source':'provider'}))
+
+
+def test_slow_local_writer_queues_other_appends_but_telemetry_stays_bounded(tmp_path, monkeypatch):
+    """A writer can outlast SQLite's short busy timeout without losing local peers."""
+    import threading
+    from concurrent.futures import TimeoutError
+    entered, release = threading.Event(), threading.Event()
+    actual_connect = sqlite3.connect
+
+    class SlowFirstWriter(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            cursor = super().execute(sql, parameters)
+            if sql.startswith('INSERT INTO events') and not entered.is_set():
+                entered.set()
+                assert release.wait(5)
+            return cursor
+
+    monkeypatch.setattr(sqlite3, 'connect', lambda *a, **kw: actual_connect(*a, factory=SlowFirstWriter, **kw))
+    path = tmp_path / 'jevgauge' / 'events.sqlite3'
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        first = pool.submit(EventStore(path).append, event(1))
+        try:
+            assert entered.wait(2)
+            second = pool.submit(EventStore(path).append, event(2))
+            # Exceed the 250ms cross-process busy timeout. A same-process append
+            # must queue before opening SQLite instead of failing database locked.
+            with pytest.raises(TimeoutError):
+                second.result(timeout=.4)
+            observer = pool.submit(record_event, tmp_path, event(3))
+            assert observer.result(timeout=1) is False
+            # Another home is independent of this writer and can still persist.
+            other = pool.submit(EventStore(tmp_path / 'other.sqlite3').append, event(4))
+            assert other.result(timeout=1) is True
+        finally:
+            release.set()
+        assert first.result(timeout=2) is True
+        assert second.result(timeout=2) is True
+    assert [row['event_id'] for row in EventStore(path).read_events()] == ['e1', 'e2']

@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 POLICY_VERSION = "jevgauge/1"
 _WORKERS = threading.BoundedSemaphore(4)
+_STORAGE_RECORD = None
+_STORAGE_LOAD_LOCK = threading.Lock()
 
 
 class _Rejected(ValueError):
@@ -131,17 +133,26 @@ def _home():
 
 
 def _record(event):
-    # Installer copies this exact stdlib-only storage module next to the plugin.
-    # Hermes need not share the Python environment that installed the dashboard.
-    try:
-        from jevgauge.telemetry import record_event
-    except ImportError:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("_jevgauge_storage", Path(__file__).with_name("telemetry.py"))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        record_event = module.record_event
-    return record_event(_home(), event)
+    # Cache the installed stdlib module once: its per-path writer locks must be
+    # shared across calls even when Hermes cannot import the dashboard package.
+    global _STORAGE_RECORD
+    if _STORAGE_RECORD is None:
+        if not _STORAGE_LOAD_LOCK.acquire(timeout=0.25):
+            return False
+        try:
+            if _STORAGE_RECORD is None:
+                try:
+                    from jevgauge.telemetry import record_event
+                except ImportError:
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location("_jevgauge_storage", Path(__file__).with_name("telemetry.py"))
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    record_event = module.record_event
+                _STORAGE_RECORD = record_event
+        finally:
+            _STORAGE_LOAD_LOCK.release()
+    return _STORAGE_RECORD(_home(), event)
 
 
 def provider_attempt(*, event, **_kw):

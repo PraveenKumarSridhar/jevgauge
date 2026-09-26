@@ -59,3 +59,10 @@
 - Final-wheel detached DEMO preview remains on http://127.0.0.1:8766/. Restart from repository root: `outputs/wheel-venv/bin/python -m jevgauge dashboard --demo --port 8766 --home outputs/demo-home`. Confirm/stop only the PID recorded in ignored `outputs/dashboard-preview.pid` before restarting.
 - Active Hermes installation untouched. In a deliberately installed compatible development checkout, use `/jev-dashboard`; otherwise use the CLI described in operations.
 - Remote CI was queued/running on creation. Its current status is reported in the task handoff and PR checks, separately from the completed local acceptance evidence.
+
+## Remote CI portability follow-up
+- Initial remote browser and pinned Hermes jobs passed. The Python matrix exposed two defects: Python 3.10 strict query parsing rejected the valid empty query, and simultaneous SQLite writers could exceed the 250 ms busy timeout on Windows and Linux.
+- Reproduced the API failure on local Python 3.10.20 with the existing empty-live integration test; fixed empty-query handling without changing nonempty strict validation. All 21 affected API/reliability tests passed.
+- Reproduced SQLite contention with a deterministic slow writer. Schema creation and insert now use one transaction and a shared per-path local writer queue. Direct appends have a bounded 5-second queue; routing telemetry retains a short 250 ms queue wait plus SQLite's 250 ms busy timeout. Separate homes remain independent.
+- Added an installed-plugin regression proving its fallback storage module is initialized once across serial/concurrent callbacks, preserving shared locks. Review independently cross-inspected these fixes.
+- Final local suites after review: 177 passed on Python 3.10.20 (11.26s) and Python 3.11.15 (10.93s). Rebuilt-wheel inspection and installed smoke passed. Remote final platform rerun is tracked on the PR.

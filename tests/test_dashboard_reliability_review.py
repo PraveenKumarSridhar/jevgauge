@@ -159,3 +159,25 @@ def test_missing_plugin_never_claims_effectively_enabled_from_stale_yaml(tmp_pat
     config=dashboard_config.read_config(tmp_path)
     assert config['can_enable'] is False
     assert config['settings']['enabled'] is False
+
+
+def test_installed_storage_cache_is_shared_on_concurrent_first_use(tmp_path,monkeypatch):
+    """Installed Hermes may not import jevgauge; first-use races must share locks."""
+    import builtins
+    import importlib.util
+    from concurrent.futures import ThreadPoolExecutor
+    from pathlib import Path
+    spec=importlib.util.spec_from_file_location('review_plugin_cache',Path(__file__).parents[1]/'jev-router/__init__.py')
+    plugin=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plugin)
+    monkeypatch.setattr(plugin,'__file__',str(tmp_path/'__init__.py'))
+    (tmp_path/'telemetry.py').write_text('import time\ntime.sleep(.05)\ndef record_event(home,event):\n    return id(globals())\n')
+    original=builtins.__import__
+    def separate_interpreter(name,*args,**kwargs):
+        if name=='jevgauge.telemetry': raise ImportError('isolated host fixture')
+        return original(name,*args,**kwargs)
+    monkeypatch.setattr(builtins,'__import__',separate_interpreter)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        identities=list(pool.map(lambda _:plugin._record({}),range(8)))
+    assert len(set(identities))==1
+    assert identities[0] is not False
