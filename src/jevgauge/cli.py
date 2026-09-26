@@ -22,7 +22,7 @@ import time
 import yaml
 
 PLUGIN = 'jev-router'
-PLUGIN_FILES = ('__init__.py', 'plugin.yaml')
+PLUGIN_FILES = ('__init__.py', 'plugin.yaml', 'telemetry.py', 'runtime.json')
 MANIFEST = '.jevgauge-install.json'
 REQUIRED_SYMBOLS = {
     'hermes_cli/plugins.py': ('has_hook', 'invoke_hook', 'register_hook', 'register_command', 'get_config'),
@@ -55,6 +55,14 @@ def check_compatibility(repo: Path) -> None:
             )
             if not supported:
                 raise InstallError('Hermes lacks SESSION_RUNTIME_SELECTION_API = 1. Standalone installation requires this generic hook in an upstream Hermes release. See the documented integration patch for a development checkout; this installer never patches Hermes.')
+            attempt_api = any(
+                isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == 'PROVIDER_ATTEMPT_API' for target in node.targets)
+                and isinstance(node.value, ast.Constant) and type(node.value.value) is int and node.value.value == 1
+                for node in tree.body
+            )
+            if not attempt_api:
+                raise InstallError('Hermes lacks PROVIDER_ATTEMPT_API = 1. Apply the documented dashboard integration to an isolated supported checkout before installation.')
         symbols = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
         symbols.update(alias.asname or alias.name for node in tree.body if isinstance(node, ast.ImportFrom) for alias in node.names)
         missing = set(required) - symbols
@@ -64,7 +72,12 @@ def check_compatibility(repo: Path) -> None:
 
 def _plugin_files() -> dict[str, bytes]:
     source = resources.files('jev_router')
-    return {name: source.joinpath(name).read_bytes() for name in PLUGIN_FILES}
+    return {
+        '__init__.py': source.joinpath('__init__.py').read_bytes(),
+        'plugin.yaml': source.joinpath('plugin.yaml').read_bytes(),
+        'telemetry.py': resources.files('jevgauge').joinpath('telemetry.py').read_bytes(),
+        'runtime.json': json.dumps({'python': sys.executable}).encode('utf-8'),
+    }
 
 
 def _hash(data: bytes) -> str:
@@ -77,21 +90,26 @@ def _check_paths(home: Path) -> None:
             raise InstallError('Refusing a symlink at the home, plugin, or config destination. Select a physical --home directory and migrate an existing development symlink explicitly.')
 
 
-def _clone(value, depth=0):
-    # Detach YAML aliases so editing plugin settings cannot mutate another section.
+def _clone(value, depth=0, budget=None):
+    # Detach aliases with a total-node budget, not only a nesting-depth bound.
+    if budget is None:
+        budget = [100000]
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise InstallError('Configuration exceeds the expanded YAML node budget.')
     if depth > 100:
         raise InstallError('Configuration has recursive or excessively nested YAML.')
     if isinstance(value, dict):
-        return {key: _clone(item, depth + 1) for key, item in value.items()}
+        return {key: _clone(item, depth + 1, budget) for key, item in value.items()}
     if isinstance(value, list):
-        return [_clone(item, depth + 1) for item in value]
+        return [_clone(item, depth + 1, budget) for item in value]
     return value
 
 
-def _read_config(home: Path) -> dict:
+def _read_config(home: Path, *, raw: bytes | None = None) -> dict:
     path = home / 'config.yaml'
     try:
-        loaded = yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {}
+        loaded = yaml.safe_load(raw.decode('utf-8')) if raw is not None else (yaml.safe_load(path.read_text(encoding='utf-8')) if path.exists() else {})
     except (yaml.YAMLError, UnicodeError):
         raise InstallError('Cannot parse config.yaml. Fix its YAML before installing; no configuration was printed.') from None
     result = _clone({} if loaded is None else loaded)
@@ -158,9 +176,9 @@ def _verify_owned(plugin: Path, *, allow_uninstalled=False) -> dict:
         source_mtime = data.get('source_mtime', 0) if valid else 0
         if type(source_mtime) is not int or not 0 <= source_mtime < 2**32 - 1:
             raise ValueError
-        if not isinstance(hashes, dict) or set(hashes) != set(PLUGIN_FILES):
+        if not isinstance(hashes, dict) or set(hashes) not in (set(PLUGIN_FILES), {'__init__.py', 'plugin.yaml'}):
             raise ValueError
-        for name in PLUGIN_FILES:
+        for name in hashes:
             path = plugin / name
             if state == 'uninstalled' and not path.exists() and not path.is_symlink():
                 continue
@@ -204,12 +222,14 @@ def operate(command: str, home: Path, repo: Path) -> None:
                 contents = _plugin_files()
                 if ownership.get('state', 'installed') == 'installed':
                     # Reinstall of identical wheel is a no-op; upgrades use uninstall/install.
-                    if any((plugin / name).read_bytes() != data for name, data in contents.items()):
+                    if set(ownership['files']) != set(contents) or any((plugin / name).read_bytes() != data for name, data in contents.items()):
                         raise InstallError('Installed plugin differs from this package. Disable and uninstall it before installing the new version; your other settings remain intact.')
                 else:
                     # A retained ownership tombstone allows reinstall without touching
                     # user files or caches. It also makes interrupted deletion retryable.
-                    for name in PLUGIN_FILES:
+                    if any((plugin / name).exists() or (plugin / name).is_symlink() for name in set(contents) - set(ownership['files'])):
+                        raise InstallError('Upgrade would overwrite an unowned plugin file. Move that file explicitly before upgrading.')
+                    for name in ownership['files']:
                         (plugin / name).unlink(missing_ok=True)
                     previous_mtime = ownership.get('source_mtime', 0)
                     source_mtime = max(int(time.time()), int(previous_mtime) + 1)
@@ -261,7 +281,7 @@ def operate(command: str, home: Path, repo: Path) -> None:
                 ownership['source_mtime'] = max(0, int(source.stat().st_mtime))
             ownership['state'] = 'uninstalled'
             _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
-            for name in PLUGIN_FILES:
+            for name in ownership['files']:
                 (plugin / name).unlink(missing_ok=True)
             if any(path.name != MANIFEST for path in plugin.iterdir()):
                 print('Owned plugin files removed; user files and caches preserved with an ownership record for reinstall.')
@@ -273,9 +293,12 @@ def operate(command: str, home: Path, repo: Path) -> None:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description='Manage the JevGauge user-scoped Hermes plugin. Never patches Hermes.')
-    result.add_argument('command', choices=('doctor', 'install', 'enable', 'disable', 'uninstall'))
+    result.add_argument('command', choices=('doctor', 'install', 'enable', 'disable', 'uninstall', 'dashboard'))
     result.add_argument('--home', type=Path, default=Path(os.environ.get('HERMES_HOME', '~/.hermes')).expanduser(), help='Hermes home (default: HERMES_HOME or ~/.hermes)')
     result.add_argument('--hermes-repo', type=Path, help='Hermes source checkout (default: <home>/hermes-agent)')
+    result.add_argument('--port', type=int, default=8765, help='Loopback dashboard port (default: 8765)')
+    result.add_argument('--demo', action='store_true', help='Use isolated synthetic dashboard evidence')
+    result.add_argument('--open', dest='open_browser', action='store_true', help='Open the dashboard in your browser')
     return result
 
 
@@ -284,7 +307,15 @@ def main(argv=None) -> int:
     home = args.home.expanduser().absolute()
     repo = (args.hermes_repo or home / 'hermes-agent').expanduser().absolute()
     try:
-        operate(args.command, home, repo)
+        if args.command == 'dashboard':
+            if not 1 <= args.port <= 65535:
+                raise InstallError('Dashboard port must be between 1 and 65535.')
+            from .dashboard import serve
+            serve(home, port=args.port, demo=args.demo, open_browser=args.open_browser)
+        else:
+            if args.demo or args.open_browser or args.port != 8765:
+                raise InstallError('Dashboard options only apply to the dashboard command.')
+            operate(args.command, home, repo)
     except InstallError as exc:
         print(f'JevGauge: {exc}', file=sys.stderr)
         return 1

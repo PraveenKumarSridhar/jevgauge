@@ -1,0 +1,26 @@
+{
+  "version": "2026-09-26.openai-text-standard.v1",
+  "verified_at": "2026-09-26",
+  "currency": "USD",
+  "units": "USD per 1000000 tokens",
+  "sources": [
+    "https://developers.openai.com/api/docs/models/gpt-4.1",
+    "https://developers.openai.com/api/docs/models/gpt-4.1-mini",
+    "https://developers.openai.com/api/docs/models/gpt-4.1-nano"
+  ],
+  "conditions": [
+    "Published standard text token API-equivalent estimates, not actual invoice charges.",
+    "No batch, priority, flex, fine-tuning, regional, tool, image, audio, or subscription pricing is modeled.",
+    "This version is a current rate snapshot, not evidence of prices billed on historical request dates.",
+    "Only exact listed model identifiers are priced; unknown models remain unpriced.",
+    "Cached input is included in input; reasoning tokens are included in output. No effort multiplier."
+  ],
+  "rates": {
+    "gpt-4.1": {"input": 2.0, "cached_input": 0.5, "output": 8.0},
+    "gpt-4.1-2025-04-14": {"input": 2.0, "cached_input": 0.5, "output": 8.0},
+    "gpt-4.1-mini": {"input": 0.4, "cached_input": 0.1, "output": 1.6},
+    "gpt-4.1-mini-2025-04-14": {"input": 0.4, "cached_input": 0.1, "output": 1.6},
+    "gpt-4.1-nano": {"input": 0.1, "cached_input": 0.025, "output": 0.4},
+    "gpt-4.1-nano-2025-04-14": {"input": 0.1, "cached_input": 0.025, "output": 0.4}
+  }
+}

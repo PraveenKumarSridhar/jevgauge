@@ -7,7 +7,11 @@ assert len(wheels) == 1, 'Expected exactly one built wheel'
 with zipfile.ZipFile(wheels[0]) as wheel:
     names = set(wheel.namelist())
     expected = {'jev_router/__init__.py', 'jev_router/plugin.yaml',
-                'jevgauge/__init__.py', 'jevgauge/__main__.py', 'jevgauge/cli.py'}
+                'jevgauge/__init__.py', 'jevgauge/__main__.py', 'jevgauge/cli.py',
+                'jevgauge/dashboard.py', 'jevgauge/dashboard_config.py',
+                'jevgauge/telemetry.py', 'jevgauge/analytics.py', 'jevgauge/pricing.json',
+                'jevgauge/demo.py', 'jevgauge/static/index.html',
+                'jevgauge/static/app.js', 'jevgauge/static/styles.css'}
     assert expected <= names, expected - names
     assert all(not name.startswith(('outputs/', '.env', 'tests/')) for name in names)
-print('Wheel contains the plugin manifest, policy, and portable CLI.')
+print('Wheel contains plugin, telemetry, dashboard API, pricing and browser assets.')

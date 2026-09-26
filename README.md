@@ -107,6 +107,24 @@ The panel's **Minimize / Details** control remembers your display preference. It
 
 For actual request evidence, inspect `<home>/logs/agent.log` for `Codex request route`. Its provider, model, and effort should match the effective binding. Do not share raw logs without checking them for private content. See the [test checklist and observed evidence](docs/verification.md).
 
+## Local dashboard
+
+The approved V5 dashboard has Savings, Decisions, Reliability and Jev cost views. It reads prompt-free routing and physical provider-attempt evidence captured by the explicit dashboard integration patch. Unknown usage and prices stay unavailable; displayed USD comparisons are API-equivalent estimates, not subscription savings.
+
+```sh
+python -m jevgauge dashboard --home /path/to/hermes-home --open
+```
+
+In integrated Hermes, `/jev-dashboard` starts the local service and opens it in your browser. Use the same persistent Python environment for installation and dashboard operation. The default address is `http://127.0.0.1:8765/`.
+
+To inspect the interface without captured activity, explicitly select demo mode:
+
+```sh
+python -m jevgauge dashboard --demo --port 8766 --open
+```
+
+Demo mode is visibly labeled and isolated from live storage and configuration. The configuration gear supports routing enablement, effort mode, timeout and model tiers through existing Hermes YAML settings, with restart/new-conversation semantics. Future capabilities remain labeled as such. [Operation, privacy and limitations](docs/dashboard/operations.md) · [Acceptance and evidence](docs/dashboard/acceptance.md).
+
 ## Stay in control
 
 ```text

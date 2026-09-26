@@ -3,6 +3,7 @@ version: 0.1.0
 description: Session-scoped Desktop model and reasoning router using TypeSafe Jev.
 provides_hooks:
   - select_session_runtime
+  - provider_attempt
 config_schema:
   enabled:
     type: bool

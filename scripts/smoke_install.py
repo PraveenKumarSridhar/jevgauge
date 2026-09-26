@@ -57,6 +57,29 @@ def main(argv=None):
         venv.EnvBuilder(with_pip=True).create(venv_path)
         python = venv_path / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
         run([python, '-m', 'pip', 'install', '--disable-pip-version-check', str(wheel)], env=environment, cwd=workspace)
+        dashboard_smoke = """from pathlib import Path
+from urllib.request import urlopen
+import json, threading
+from jevgauge.dashboard import create_server
+server = create_server(Path('dashboard-demo-home'), port=0, demo=True)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+try:
+    base = f'http://127.0.0.1:{server.server_port}'
+    for route, marker in [('/', b'JevGauge'), ('/app.js', b'/api/dashboard'), ('/styles.css', b'#jg-v5')]:
+        with urlopen(base + route, timeout=5) as response:
+            assert response.status == 200 and marker in response.read()
+    with urlopen(base + '/api/dashboard', timeout=5) as response:
+        data = json.load(response)
+        assert data['mode'] == 'demo' and data['summary']['request_count'] == 65
+    assert not Path('dashboard-demo-home').exists()
+finally:
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+"""
+        run([python, '-c', dashboard_smoke], env=environment, cwd=workspace)
+        print('PASS installed wheel serves V5 assets and isolated demo API outside source checkout')
         config = home / 'config.yaml'
         config.write_text('model: original\nprivate_setting: fixture-only\nplugins:\n  enabled: [other]\n  entries:\n    other:\n      settings: {keep: true}\n', encoding='utf-8')
         original = "{'model':'original','private_setting':'fixture-only','plugins':{'enabled':['other'],'entries':{'other':{'settings':{'keep':True}}}}}"
