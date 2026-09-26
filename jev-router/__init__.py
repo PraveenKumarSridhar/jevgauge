@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
+from datetime import datetime, timezone
+import uuid
 import json
 import math
 import contextvars
@@ -16,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 POLICY_VERSION = "jevgauge/1"
 _WORKERS = threading.BoundedSemaphore(4)
+_STORAGE_RECORD = None
+_STORAGE_LOAD_LOCK = threading.Lock()
 
 
 class _Rejected(ValueError):
@@ -118,7 +124,82 @@ def _decide(state: str, api_key: str, api_url: str, jev_model: str) -> dict:
     return response.json()
 
 
-def route(*, ctx, message: str, source: str, provider: str, model: str,
+def _home():
+    try:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home().expanduser().absolute()
+    except ImportError:
+        return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser().absolute()
+
+
+def _record(event):
+    # Cache the installed stdlib module once: its per-path writer locks must be
+    # shared across calls even when Hermes cannot import the dashboard package.
+    global _STORAGE_RECORD
+    if _STORAGE_RECORD is None:
+        if not _STORAGE_LOAD_LOCK.acquire(timeout=0.25):
+            return False
+        try:
+            if _STORAGE_RECORD is None:
+                try:
+                    from jevgauge.telemetry import record_event
+                except ImportError:
+                    import importlib.util
+                    spec = importlib.util.spec_from_file_location("_jevgauge_storage", Path(__file__).with_name("telemetry.py"))
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    record_event = module.record_event
+                _STORAGE_RECORD = record_event
+        finally:
+            _STORAGE_LOAD_LOCK.release()
+    return _STORAGE_RECORD(_home(), event)
+
+
+def provider_attempt(*, event, **_kw):
+    """Observer only: storage failures never affect provider execution."""
+    try:
+        _record(event)
+    except Exception:
+        pass
+
+
+def route(**kwargs):
+    started = time.monotonic()
+    result = _route(**kwargs)
+    # Capture only supported Desktop conversations; no fabricated historical import.
+    if kwargs.get("source") != "desktop" or kwargs.get("provider") != "openai-codex" or not kwargs.get("session_key"):
+        return result
+    try:
+        meta = (result or {}).get("metadata", {})
+        defaults = {"default_model": kwargs.get("model"),
+                    "default_effort": _effective_effort(kwargs.get("reasoning_config"))}
+        meta.update(defaults)
+        candidates = meta.get("candidate_models", {})
+        capabilities = {}
+        for rank, tier in enumerate(("economical", "balanced", "strongest")):
+            for model in candidates.get(tier, []):
+                capabilities[model] = max(rank, capabilities.get(model, 0))
+        event = {"schema_version": 1, "event_id": str(uuid.uuid4()), "kind": "route",
+                 "conversation_id": kwargs["session_key"],
+                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                 **defaults, "provider": kwargs["provider"], "policy_version": POLICY_VERSION,
+                 "selected_model": meta.get("model", kwargs.get("model")),
+                 "requested_effort": meta.get("reasoning_effort", defaults["default_effort"]),
+                 "model_tier": meta.get("model_tier"), "effort_tier": meta.get("effort_tier"),
+                 "reason_code": meta.get("reason", "routing disabled"),
+                 "outcome": "routed" if meta.get("status") == "routed" else "abstained" if result else "disabled",
+                 "eligible_models": [{"model": model, "capability": rank} for model, rank in sorted(capabilities.items())],
+                 "eligibility_source": "account catalog intersected with configured capacity tiers" if capabilities else None,
+                 "manual_override": bool(kwargs.get("user_model") or kwargs.get("user_reasoning") or kwargs["ctx"].get_config("effort_mode", "auto") == "manual"),
+                 "latency_ms": (time.monotonic() - started) * 1000}
+        meta["telemetry_route_id"] = event["event_id"]
+        _record(event)
+    except Exception:
+        pass
+    return result
+
+
+def _route(*, ctx, message: str, source: str, provider: str, model: str,
           reasoning_config: Any, user_model: bool, user_reasoning: bool, **_kw) -> dict | None:
     if source != "desktop" or provider != "openai-codex" or not ctx.get_config("enabled", False):
         return None
@@ -174,6 +255,7 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
         return _default("missing Jev credential", model=model, provider=provider,
                         reasoning_config=reasoning_config,
                         user_model=user_model, user_reasoning=user_reasoning)
+    eligible = {}
     try:
         live = set(_live_models())
         tiers = ctx.get_config("tier_models", DEFAULT_TIERS)
@@ -205,7 +287,7 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
             "label": "JevGauge", "status": "routed", "reason": f"{model_tier}/{'manual' if user_reasoning else effort_tier}",
             "policy_version": POLICY_VERSION, "jev_model": jev_model,
             "model": chosen, "provider": provider, "reasoning_effort": chosen_effort,
-            "candidate_models": eligible, "owner": {
+            "candidate_models": eligible, "model_tier": model_tier, "effort_tier": effort_tier, "owner": {
                 "model": "user" if user_model else "router",
                 "reasoning": "user" if user_reasoning else "router"},
         }
@@ -213,15 +295,69 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
                 "reasoning_effort": None if user_reasoning else chosen_effort, "metadata": metadata}
     except Exception as exc:
         logger.warning("Jev routing fell back: %s", type(exc).__name__)
-        return _default(str(exc) if isinstance(exc, _Rejected) else type(exc).__name__,
-                        model=model, provider=provider, reasoning_config=reasoning_config,
-                        user_model=user_model, user_reasoning=user_reasoning)
+        result = _default(str(exc) if isinstance(exc, _Rejected) else type(exc).__name__,
+                          model=model, provider=provider, reasoning_config=reasoning_config,
+                          user_model=user_model, user_reasoning=user_reasoning)
+        result["metadata"]["candidate_models"] = eligible
+        return result
 
 
 def register(ctx) -> None:
-    if ctx.get_config("enabled", False):
-        ctx.register_hook("select_session_runtime", lambda **kwargs: route(ctx=ctx, **kwargs))
-        ctx.register_command("jev-status", status, description="Show this chat's Jev routing binding")
+    ctx.register_hook("select_session_runtime", lambda **kwargs: route(ctx=ctx, **kwargs))
+    ctx.register_hook("provider_attempt", provider_attempt)
+    ctx.register_command("jev-dashboard", dashboard, description="Open the local JevGauge dashboard")
+    ctx.register_command("jev-status", status, description="Show this chat's Jev routing binding")
+
+
+def dashboard(_args: str = "") -> str:
+    """Launch the installed dashboard through Hermes' supported command registry."""
+    import subprocess
+    import hashlib
+    import urllib.request
+    import webbrowser
+    home = _home()
+    url = "http://127.0.0.1:8765/"
+    def open_running():
+        try:
+            opened = webbrowser.open(url)
+        except Exception:
+            opened = False
+        return "Opened JevGauge at " + url if opened else "JevGauge is running at " + url + " (browser opening unavailable)."
+
+    try:
+        # The health identity prevents opening an unrelated process on this port.
+        def running():
+            with urllib.request.urlopen(url + "api/health", timeout=0.3) as response:
+                identity = json.load(response)
+            return (identity.get("service") == "jevgauge" and identity.get("mode") == "live"
+                    and identity.get("home_id") == hashlib.sha256(str(home).encode()).hexdigest())
+        try:
+            if running():
+                return open_running()
+        except Exception:
+            pass
+        runtime = json.loads(Path(__file__).with_name("runtime.json").read_text())
+        python = Path(runtime["python"])
+        if not python.is_absolute() or not python.is_file():
+            raise ValueError("Missing dashboard interpreter")
+        process = subprocess.Popen([str(python), "-m", "jevgauge", "dashboard", "--home", str(home)],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        for _ in range(40):
+            if process.poll() is not None:
+                break
+            try:
+                if running():
+                    return open_running()
+            except Exception:
+                pass
+            time.sleep(0.1)
+        if process.poll() is None:
+            process.terminate()
+    except Exception:
+        pass
+    return "JevGauge dashboard could not start. Run the installed jevgauge dashboard command and check the loopback port and installation."
+
 
 
 def _session_record():

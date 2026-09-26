@@ -3,5 +3,7 @@
   "commit": "d0288be5b3330d2442e3907185b8e9d0958297bb",
   "api": "SESSION_RUNTIME_SELECTION_API",
   "version": 1,
-  "status": "proposed, not an upstream release API"
+  "status": "proposed, not an upstream release API",
+  "telemetry_api": "PROVIDER_ATTEMPT_API",
+  "telemetry_version": 1
 }

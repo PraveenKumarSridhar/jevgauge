@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Praveen Kumar"}]
-dependencies = ["PyYAML>=6.0.2,<7", "httpx>=0.28.1,<1"]
+dependencies = ["PyYAML>=6.0.2,<7", "httpx>=0.28.1,<1", "tzdata>=2025.1"]
 
 [project.optional-dependencies]
 test = ["pytest>=8.3,<9", "build>=1.2,<2"]
@@ -23,11 +23,12 @@ Repository = "https://github.com/PraveenKumarSridhar/jevgauge"
 Issues = "https://github.com/PraveenKumarSridhar/jevgauge/issues"
 
 [tool.setuptools]
-packages = ["jevgauge", "jev_router"]
+packages = ["jevgauge", "jevgauge.static", "jev_router"]
 package-dir = {jevgauge = "src/jevgauge", jev_router = "jev-router"}
 
 [tool.setuptools.package-data]
 jev_router = ["plugin.yaml"]
+jevgauge = ["pricing.json", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

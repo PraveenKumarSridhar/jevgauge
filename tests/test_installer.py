@@ -13,12 +13,14 @@ def installation(tmp_path, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('\n'.join(f'def {name}(): pass' for name in names))
     plugins = repo / 'hermes_cli/plugins.py'
-    plugins.write_text(plugins.read_text() + '\nSESSION_RUNTIME_SELECTION_API = 1\n')
+    plugins.write_text(plugins.read_text() + '\nSESSION_RUNTIME_SELECTION_API = 1\nPROVIDER_ATTEMPT_API = 1\n')
     home = tmp_path / 'User home'
     source = tmp_path / 'source'
     source.mkdir()
     (source / '__init__.py').write_text('# router\n')
     (source / 'plugin.yaml').write_text('name: jev-router\n')
+    (source / 'telemetry.py').write_text('# telemetry fixture\n')
+    (source / 'runtime.json').write_text('{}')
     monkeypatch.setattr(cli, '_plugin_files', lambda: {name: (source / name).read_bytes() for name in cli.PLUGIN_FILES})
     return repo, home
 
@@ -263,14 +265,14 @@ def test_same_size_upgrade_does_not_execute_stale_cache(installation, monkeypatc
     import py_compile
     import os
     _, home = installation
-    monkeypatch.setattr(cli, '_plugin_files', lambda: {'__init__.py': b'VALUE = 1\n', 'plugin.yaml': b'name: jev-router\n'})
+    monkeypatch.setattr(cli, '_plugin_files', lambda: {'__init__.py': b'VALUE = 1\n', 'plugin.yaml': b'name: jev-router\n', 'telemetry.py': b'', 'runtime.json': b'{}'})
     assert run(installation, 'install') == 0
     source = home / 'plugins/jev-router/__init__.py'
     timestamp = 1800000000
     os.utime(source, (timestamp, timestamp))
     py_compile.compile(str(source), doraise=True)
     assert run(installation, 'uninstall') == 0
-    monkeypatch.setattr(cli, '_plugin_files', lambda: {'__init__.py': b'VALUE = 2\n', 'plugin.yaml': b'name: jev-router\n'})
+    monkeypatch.setattr(cli, '_plugin_files', lambda: {'__init__.py': b'VALUE = 2\n', 'plugin.yaml': b'name: jev-router\n', 'telemetry.py': b'', 'runtime.json': b'{}'})
     monkeypatch.setattr(cli.time, 'time', lambda: timestamp)
     assert run(installation, 'install') == 0
     spec = importlib.util.spec_from_file_location('installer_cache_test', source)
@@ -311,3 +313,59 @@ def test_malformed_tombstone_timestamp_refused(installation, invalid):
     manifest.write_text(json.dumps(data))
     assert run(installation, 'install') == 1
     assert not (plugin / '__init__.py').exists()
+
+
+def test_distributable_plugin_has_standalone_telemetry_and_dashboard_runtime():
+    import sys
+    files = cli._plugin_files()
+    assert 'telemetry.py' in files
+    assert b'class EventStore' in files['telemetry.py']
+    assert json.loads(files['runtime.json']) == {'python': sys.executable}
+
+
+def test_dashboard_cli_dispatches_without_installing(tmp_path, monkeypatch):
+    import jevgauge.dashboard as dashboard
+    observed = []
+    monkeypatch.setattr(dashboard, 'serve', lambda home, **kwargs: observed.append((home, kwargs)))
+    assert cli.main(['dashboard', '--home', str(tmp_path), '--demo', '--port', '8766', '--open']) == 0
+    assert observed == [(tmp_path, {'port': 8766, 'demo': True, 'open_browser': True})]
+    assert not list(tmp_path.iterdir())
+
+
+def test_legacy_plugin_can_be_uninstalled_before_dashboard_upgrade(installation):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    manifest_path = plugin / cli.MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    for name in ('telemetry.py', 'runtime.json'):
+        (plugin / name).unlink()
+        del manifest['files'][name]
+    manifest_path.write_text(json.dumps(manifest))
+    assert run(installation, 'uninstall') == 0
+    assert not plugin.exists()
+
+
+def test_legacy_upgrade_preserves_unowned_new_filenames(installation):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    manifest_path = plugin / cli.MANIFEST
+    manifest = json.loads(manifest_path.read_text())
+    for name in ('telemetry.py', 'runtime.json'):
+        del manifest['files'][name]
+    manifest_path.write_text(json.dumps(manifest))
+    (plugin / 'telemetry.py').write_text('# user-owned unrelated file')
+    assert run(installation, 'uninstall') == 0
+    assert (plugin / 'telemetry.py').read_text() == '# user-owned unrelated file'
+    assert run(installation, 'install') == 1
+    assert (plugin / 'telemetry.py').read_text() == '# user-owned unrelated file'
+
+
+def test_dashboard_install_refuses_host_without_physical_attempt_hook(installation, capsys):
+    repo, home = installation
+    path = repo / 'hermes_cli/plugins.py'
+    path.write_text(path.read_text().replace('PROVIDER_ATTEMPT_API = 1', '# PROVIDER_ATTEMPT_API = 1'))
+    assert run(installation, 'install') == 1
+    assert not home.exists()
+    assert 'PROVIDER_ATTEMPT_API' in capsys.readouterr().err
