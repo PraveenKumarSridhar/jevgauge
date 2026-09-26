@@ -1,0 +1,64 @@
+name: Tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  portable:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install '.[test]'
+      - run: python -m pytest
+      - run: python -m build
+      - name: Inspect the wheel
+        run: python scripts/check_wheel.py
+  hermes:
+    name: Pinned Hermes lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: jevgauge
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: d0288be5b3330d2442e3907185b8e9d0958297bb
+          path: hermes
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Apply explicit integration
+        working-directory: hermes
+        run: |
+          git apply --check ../jevgauge/integration/hermes-runtime-selection.patch
+          git apply ../jevgauge/integration/hermes-runtime-selection.patch
+      - name: Hermes canonical lifecycle tests
+        working-directory: hermes
+        run: >-
+          scripts/run_tests.sh
+          tests/tui_gateway/test_first_prompt_route_hook.py
+          tests/tui_gateway/test_route_manual_switch.py
+          tests/agent/test_first_session_route_fallback.py
+          tests/tui_gateway/test_model_switch_reasoning_flag.py
+          tests/tui_gateway/test_reasoning_session_scope.py
+          tests/tui_gateway/test_deferred_model_switch_confirm.py
+          tests/tui_gateway/test_make_agent_provider.py
+          tests/tui_gateway/contracts/test_generated.py
+      - name: Build and smoke the installed wheel
+        working-directory: jevgauge
+        run: |
+          python -m pip install '.[test]'
+          python -m build
+          python scripts/smoke_install.py --wheel dist/jevgauge-0.1.0-py3-none-any.whl --hermes-repo ../hermes
