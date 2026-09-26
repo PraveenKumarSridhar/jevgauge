@@ -200,3 +200,114 @@ def test_live_lock_refuses_without_changes(installation):
     assert run(installation, 'install') == 1
     assert lock.exists()
     assert not (home / 'config.yaml').exists()
+
+
+def test_reinstall_after_python_import_preserves_bytecode(installation):
+    import py_compile
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    cache = Path(py_compile.compile(str(plugin / '__init__.py'), doraise=True))
+    cached_bytes = cache.read_bytes()
+    assert run(installation, 'uninstall') == 0
+    assert cache.read_bytes() == cached_bytes
+    assert run(installation, 'install') == 0
+    assert (plugin / '__init__.py').is_file()
+    assert cache.read_bytes() == cached_bytes
+
+
+def test_upgrade_preserves_unknown_files_and_custom_settings(installation, monkeypatch):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    (plugin / 'notes.txt').write_text('keep')
+    assert run(installation, 'uninstall') == 0
+    assert run(installation, 'uninstall') == 0
+    assert run(installation, 'enable') == 1
+    monkeypatch.setattr(cli, '_plugin_files', lambda: {'__init__.py': b'# new version', 'plugin.yaml': b'name: jev-router\n'})
+    assert run(installation, 'install') == 0
+    assert (plugin / '__init__.py').read_text() == '# new version'
+    assert (plugin / 'notes.txt').read_text() == 'keep'
+
+
+def test_tombstone_never_overwrites_new_user_code(installation):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    (plugin / 'notes.txt').write_text('keep')
+    assert run(installation, 'uninstall') == 0
+    (plugin / '__init__.py').write_text('# user replacement')
+    assert run(installation, 'install') == 1
+    assert run(installation, 'uninstall') == 1
+    assert (plugin / '__init__.py').read_text() == '# user replacement'
+
+
+def test_partial_uninstall_can_be_retried(installation, monkeypatch):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    original = Path.unlink
+    def fail_yaml_once(path, *args, **kwargs):
+        if path == plugin / 'plugin.yaml':
+            raise PermissionError('simulated transient access failure')
+        return original(path, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'unlink', fail_yaml_once)
+        assert run(installation, 'uninstall') == 1
+    assert run(installation, 'uninstall') == 0
+    assert not plugin.exists()
+
+
+def test_same_size_upgrade_does_not_execute_stale_cache(installation, monkeypatch):
+    import importlib.util
+    import py_compile
+    import os
+    _, home = installation
+    monkeypatch.setattr(cli, '_plugin_files', lambda: {'__init__.py': b'VALUE = 1\n', 'plugin.yaml': b'name: jev-router\n'})
+    assert run(installation, 'install') == 0
+    source = home / 'plugins/jev-router/__init__.py'
+    timestamp = 1800000000
+    os.utime(source, (timestamp, timestamp))
+    py_compile.compile(str(source), doraise=True)
+    assert run(installation, 'uninstall') == 0
+    monkeypatch.setattr(cli, '_plugin_files', lambda: {'__init__.py': b'VALUE = 2\n', 'plugin.yaml': b'name: jev-router\n'})
+    monkeypatch.setattr(cli.time, 'time', lambda: timestamp)
+    assert run(installation, 'install') == 0
+    spec = importlib.util.spec_from_file_location('installer_cache_test', source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.VALUE == 2
+
+
+def test_partial_reinstall_can_be_retried(installation, monkeypatch):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    (plugin / 'notes.txt').write_text('keep')
+    assert run(installation, 'uninstall') == 0
+    write = cli._atomic_write
+    def fail_yaml(path, data, *args, **kwargs):
+        if path == plugin / 'plugin.yaml':
+            raise PermissionError('temporary failure')
+        return write(path, data, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(cli, '_atomic_write', fail_yaml)
+        assert run(installation, 'install') == 1
+    assert run(installation, 'enable') == 1
+    assert run(installation, 'install') == 0
+    assert (plugin / 'notes.txt').read_text() == 'keep'
+
+
+@pytest.mark.parametrize('invalid', [float('nan'), float('inf'), 'bad', -1, 2**100])
+def test_malformed_tombstone_timestamp_refused(installation, invalid):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    (plugin / 'notes.txt').write_text('keep')
+    assert run(installation, 'uninstall') == 0
+    manifest = plugin / cli.MANIFEST
+    data = json.loads(manifest.read_text())
+    data['source_mtime'] = invalid
+    manifest.write_text(json.dumps(data))
+    assert run(installation, 'install') == 1
+    assert not (plugin / '__init__.py').exists()

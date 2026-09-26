@@ -17,6 +17,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import time
 
 import yaml
 
@@ -141,7 +142,7 @@ def _write_config(home: Path, config: dict) -> None:
     _atomic_write(path, yaml.safe_dump(config, sort_keys=False).encode('utf-8'), mode)
 
 
-def _verify_owned(plugin: Path) -> None:
+def _verify_owned(plugin: Path, *, allow_uninstalled=False) -> dict:
     if not plugin.is_dir() or plugin.is_symlink():
         raise InstallError('Plugin is not an owned JevGauge directory. Existing directories and development symlinks must be migrated explicitly.')
     manifest = plugin / MANIFEST
@@ -151,12 +152,21 @@ def _verify_owned(plugin: Path) -> None:
         data = json.loads(manifest.read_text(encoding='utf-8'))
         valid = isinstance(data, dict) and data.get('owner') == 'jevgauge' and data.get('format') == 1
         hashes = data.get('files') if valid else None
+        state = data.get('state', 'installed') if valid else None
+        if state not in ('installed', 'uninstalled') or (state == 'uninstalled' and not allow_uninstalled):
+            raise ValueError
+        source_mtime = data.get('source_mtime', 0) if valid else 0
+        if type(source_mtime) is not int or not 0 <= source_mtime < 2**32 - 1:
+            raise ValueError
         if not isinstance(hashes, dict) or set(hashes) != set(PLUGIN_FILES):
             raise ValueError
         for name in PLUGIN_FILES:
             path = plugin / name
+            if state == 'uninstalled' and not path.exists() and not path.is_symlink():
+                continue
             if path.is_symlink() or not path.is_file() or _hash(path.read_bytes()) != hashes[name]:
                 raise ValueError
+        return data
     except (OSError, ValueError, UnicodeError):
         raise InstallError('Refusing unmanaged or locally modified plugin files. Back up and move the directory before reinstalling or removing it.') from None
 
@@ -190,10 +200,28 @@ def operate(command: str, home: Path, repo: Path) -> None:
         plugin = home / 'plugins' / PLUGIN
         if command == 'install':
             if plugin.exists():
-                _verify_owned(plugin)
-                # Reinstall of identical wheel is a no-op; upgrades use uninstall/install.
-                if any((plugin / name).read_bytes() != contents for name, contents in _plugin_files().items()):
-                    raise InstallError('Installed plugin differs from this package. Disable and uninstall it before installing the new version; your other settings remain intact.')
+                ownership = _verify_owned(plugin, allow_uninstalled=True)
+                contents = _plugin_files()
+                if ownership.get('state', 'installed') == 'installed':
+                    # Reinstall of identical wheel is a no-op; upgrades use uninstall/install.
+                    if any((plugin / name).read_bytes() != data for name, data in contents.items()):
+                        raise InstallError('Installed plugin differs from this package. Disable and uninstall it before installing the new version; your other settings remain intact.')
+                else:
+                    # A retained ownership tombstone allows reinstall without touching
+                    # user files or caches. It also makes interrupted deletion retryable.
+                    for name in PLUGIN_FILES:
+                        (plugin / name).unlink(missing_ok=True)
+                    previous_mtime = ownership.get('source_mtime', 0)
+                    source_mtime = max(int(time.time()), int(previous_mtime) + 1)
+                    ownership.update(state='uninstalled', files={name: _hash(data) for name, data in contents.items()}, source_mtime=source_mtime)
+                    _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
+                    for name, data in contents.items():
+                        _atomic_write(plugin / name, data, 0o644)
+                    # Keep timestamp-based Python caches from executing a previous
+                    # same-size version installed within the same clock second.
+                    os.utime(plugin / '__init__.py', (source_mtime, source_mtime))
+                    ownership['state'] = 'installed'
+                    _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
             else:
                 contents = _plugin_files()
                 plugin.parent.mkdir(parents=True, exist_ok=True)
@@ -218,7 +246,7 @@ def operate(command: str, home: Path, repo: Path) -> None:
             _set_enabled(config, False)
             _write_config(home, config)
         elif command == 'uninstall':
-            _verify_owned(plugin)
+            ownership = _verify_owned(plugin, allow_uninstalled=True)
             _set_enabled(config, False)
             # Preserve user settings for a later reinstall, except installer-owned enable.
             settings = config['plugins']['entries'][PLUGIN]['settings']
@@ -228,12 +256,18 @@ def operate(command: str, home: Path, repo: Path) -> None:
             if not config['plugins']['entries'][PLUGIN]:
                 config['plugins']['entries'].pop(PLUGIN)
             _write_config(home, config)
-            for name in (*PLUGIN_FILES, MANIFEST):
-                (plugin / name).unlink()
-            try:
+            source = plugin / '__init__.py'
+            if source.exists():
+                ownership['source_mtime'] = max(0, int(source.stat().st_mtime))
+            ownership['state'] = 'uninstalled'
+            _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
+            for name in PLUGIN_FILES:
+                (plugin / name).unlink(missing_ok=True)
+            if any(path.name != MANIFEST for path in plugin.iterdir()):
+                print('Owned plugin files removed; user files and caches preserved with an ownership record for reinstall.')
+            else:
+                (plugin / MANIFEST).unlink()
                 plugin.rmdir()
-            except OSError:
-                print('Owned plugin files removed; remaining user or cache files were preserved.')
         print(f'{command.capitalize()} complete. Restart Hermes Desktop to apply changes.')
 
 

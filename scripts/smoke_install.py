@@ -60,7 +60,7 @@ def main(argv=None):
         config = home / 'config.yaml'
         config.write_text('model: original\nprivate_setting: fixture-only\nplugins:\n  enabled: [other]\n  entries:\n    other:\n      settings: {keep: true}\n', encoding='utf-8')
         original = "{'model':'original','private_setting':'fixture-only','plugins':{'enabled':['other'],'entries':{'other':{'settings':{'keep':True}}}}}"
-        for action in ('doctor', 'install', 'install', 'disable', 'enable', 'uninstall'):
+        for action in ('doctor', 'install', 'install', 'disable', 'enable', 'uninstall', 'install', 'disable', 'uninstall'):
             run([python, '-m', 'jevgauge', action, '--hermes-repo', repo], env=environment, cwd=workspace)
             if action in ('install', 'enable', 'disable'):
                 enabled = action != 'disable'
@@ -73,9 +73,22 @@ assert ('jev-router' in c['plugins']['enabled']) is {enabled!r}
 assert c['plugins']['entries']['jev-router']['settings']['enabled'] is {enabled!r}
 '''
                 run([python, '-c', assertion], env=environment, cwd=workspace)
+            if action == 'enable':
+                installed_source = home / 'plugins/jev-router/__init__.py'
+                load_plugin = f'''import importlib.util
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('smoke_plugin', {str(installed_source)!r})
+module=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert callable(module.register)
+assert list(Path({str(installed_source.parent)!r}).glob('__pycache__/__init__.*.pyc'))
+'''
+                run([python, '-c', load_plugin], env=environment, cwd=workspace)
+                print('PASS deployed plugin import created Python cache without provider calls')
             print(f'PASS wheel {action}')
         run([python, '-c', f'import yaml; from pathlib import Path; assert yaml.safe_load(Path({str(config)!r}).read_text()) == {original}'], env=environment, cwd=workspace)
-        assert not (home / 'plugins/jev-router').exists()
+        assert not (home / 'plugins/jev-router/__init__.py').exists()
+        assert list((home / 'plugins/jev-router/__pycache__').glob('__init__.*.pyc'))
         # Build a read-only compatibility fixture from real modules, replacing
         # only plugins.py with committed HEAD (the local upstream base).
         required = run([python, '-c', 'import json; from jevgauge.cli import REQUIRED_SYMBOLS; print(json.dumps(list(REQUIRED_SYMBOLS)))'], env=environment, cwd=workspace)
@@ -88,7 +101,8 @@ assert c['plugins']['entries']['jev-router']['settings']['enabled'] is {enabled!
         (upstream / 'hermes_cli/plugins.py').write_text(committed, encoding='utf-8')
         result = run([python, '-m', 'jevgauge', 'install', '--hermes-repo', upstream], env=environment, cwd=workspace, expected=1)
         assert 'upstream' in result.stderr and 'SESSION_RUNTIME_SELECTION_API' in result.stderr
-        assert not (home / 'plugins/jev-router').exists()
+        assert not (home / 'plugins/jev-router/__init__.py').exists()
+        assert list((home / 'plugins/jev-router/__pycache__').glob('__init__.*.pyc'))
         print('PASS committed upstream API refuses unsupported installation')
         print('PASS unrelated configuration preserved; no user home or credentials used')
     return 0
