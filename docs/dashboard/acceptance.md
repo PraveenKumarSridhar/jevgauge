@@ -24,7 +24,7 @@ Implementation baseline: `c4c5e44`, which matched clean `origin/main`. Baseline 
 | Existing regressions and pinned Hermes checks | Verified locally | Final Python suite 173 passed; pinned Hermes canonical suite 61 passed across 10 files; Desktop Vitest 14 passed across 2 files |
 | Browser and accessibility verification | Verified locally | Final 11 Chrome scenarios, no skipped tests; five-screen Axe checks, keyboard/focus, real demo/live services and light/dark desktop/mobile inspection |
 | Independent review, findings reproduced and resolved | Verified | [Accounting](accounting-review.md), [reliability](reliability-review.md), frontend cross-review of browser-launch errors; fixes cross-inspected and affected checks rerun |
-| Draft PR and final running preview | Pending delivery | To be recorded after push and GitHub creation; no merge/release/public deployment authorized |
+| Draft PR and final running preview | Verified | [Draft PR #1](https://github.com/PraveenKumarSridhar/jevgauge/pull/1), branch `codex/approved-v5-dashboard`; detached final-wheel DEMO at `http://127.0.0.1:8766/`, browser and data checked after restart; no merge/release/public deployment |
 
 ## Reviewed screenshots
 

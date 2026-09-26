@@ -53,3 +53,9 @@
 - Controlled Hermes script was rerun using the freshly installed wheel interpreter, not editable source: discovery -> physical usage -> cold resume -> RPC -> child service -> browser handoff passed.
 - Final browser run: 11 passed in 9.0s, zero skips. Final source Python suite: 173 passed.
 - Detached preview uses the final installed wheel on http://127.0.0.1:8766/, explicitly DEMO. Health/data rechecked: 28 synthetic conversations, 65 requests, model partition 28, cache coverage field present. Final browser toggle and coverage labels inspected after restart; tab kept as a deliverable.
+
+## Delivery
+- Implementation committed and pushed; draft PR #1: https://github.com/PraveenKumarSridhar/jevgauge/pull/1.
+- Final-wheel detached DEMO preview remains on http://127.0.0.1:8766/. Restart from repository root: `outputs/wheel-venv/bin/python -m jevgauge dashboard --demo --port 8766 --home outputs/demo-home`. Confirm/stop only the PID recorded in ignored `outputs/dashboard-preview.pid` before restarting.
+- Active Hermes installation untouched. In a deliberately installed compatible development checkout, use `/jev-dashboard`; otherwise use the CLI described in operations.
+- Remote CI was queued/running on creation. Its current status is reported in the task handoff and PR checks, separately from the completed local acceptance evidence.
