@@ -6,6 +6,7 @@
   const all = selector => [...root.querySelectorAll(selector)];
   const esc = value => String(value ?? 'Unavailable').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const money = value => Number.isFinite(value) ? new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits:value !== 0 && Math.abs(value) < .01 ? 4 : 2, maximumFractionDigits: value !== 0 && Math.abs(value) < .01 ? 4 : 2}).format(value) : 'Unavailable';
+  const rateMoney = value => Number.isFinite(value) ? new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', minimumFractionDigits:2, maximumFractionDigits:20}).format(value) : 'Unavailable';
   const nice = value => String(value ?? 'Unavailable').replaceAll('_', ' ');
   const count = value => Number.isFinite(value) ? value.toLocaleString('en-US') : 'Unavailable';
   const state = {view:'overview', period:'month', project:'all', usage:'conversations', filter:null, selected:null, page:0, timezone:Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', start:null, end:null};
@@ -69,17 +70,22 @@
     const params=new URLSearchParams({timezone:state.timezone});
     if(state.start)params.set('start',state.start); if(state.end)params.set('end',state.end); if(state.project!=='all')params.set('project',state.project);
     try {
-      const response=await fetch('/api/dashboard?'+params,{signal:controller.signal,cache:'no-store'}); if(!response.ok)throw new Error('request');
+      const response=await fetch('/api/dashboard?'+params,{signal:controller.signal,cache:'no-store'});
+      if(!response.ok){
+        const failure=await response.json().catch(()=>null), issue=new Error('request');
+        if(typeof failure?.error==='string'&&failure.error.trim()&&failure.error.length<=512)issue.displayMessage=failure.error;
+        throw issue;
+      }
       const result=await response.json(); if(!result.summary||!Array.isArray(result.conversations))throw new Error('shape'); if(current!==sequence)return;
       data=result;
       if(initial){setPeriod('month', result.mode==='demo'&&result.as_of ? dateOnly(new Date(result.as_of.length===10?result.as_of+'T12:00:00Z':result.as_of)) : undefined); return load();}
       loading=false; render();
-    } catch(e) { if(e.name==='AbortError'||current!==sequence)return; loading=false; error='Could not load captured evidence. Check the local dashboard service and retry.'; renderChrome(); }
+    } catch(e) { if(e.name==='AbortError'||current!==sequence)return; loading=false; error='Could not load captured evidence. '+(e.displayMessage||'Check the local dashboard service and retry.'); renderChrome(); }
   }
   function priceHTML() {
     const p=data.pricing || {}; const sources=Array.isArray(p.sources)?p.sources:[];
     const links=sources.map(source=>{const item=typeof source==='string'?{url:source}:source; let url;try {url=new URL(item.url);}catch{return '';}return url.protocol==='https:'?`<a href="${esc(url.href)}" target="_blank" rel="noopener noreferrer">${esc(item.title||item.provider||url.hostname)}</a>`:'';}).filter(Boolean);
-    return `<p>Price book: ${esc(p.version || 'Unavailable')}. USD only. ${esc(p.units||'Published rates per million tokens')}.</p><p>${links.join(' · ') || 'No published pricing source available.'}</p>${Object.keys(p.rates||{}).length?`<table class="j-price-table"><caption>USD per 1M tokens</caption><thead><tr><th>Model</th><th>Input</th><th>Cached</th><th>Output</th></tr></thead><tbody>${Object.entries(p.rates).map(([model,r])=>`<tr><td>${esc(model)}</td><td>${money(r.input)}</td><td>${money(r.cached_input)}</td><td>${money(r.output)}</td></tr>`).join('')}</tbody></table>`:''}${p.conditions?`<p>${Array.isArray(p.conditions)?p.conditions.map(c=>esc(c)).join('</p><p>'):esc(p.conditions)}</p>`:''}`;
+    return `<p>Price book: ${esc(p.version || 'Unavailable')}. USD only. ${esc(p.units||'Published rates per million tokens')}.</p><p>${links.join(' · ') || 'No published pricing source available.'}</p>${Object.keys(p.rates||{}).length?`<table class="j-price-table"><caption>USD per 1M tokens</caption><thead><tr><th>Model</th><th>Input</th><th>Cached</th><th>Output</th></tr></thead><tbody>${Object.entries(p.rates).map(([model,r])=>`<tr><td>${esc(model)}</td><td>${rateMoney(r.input)}</td><td>${rateMoney(r.cached_input)}</td><td>${rateMoney(r.output)}</td></tr>`).join('')}</tbody></table>`:''}${p.conditions?`<p>${Array.isArray(p.conditions)?p.conditions.map(c=>esc(c)).join('</p><p>'):esc(p.conditions)}</p>`:''}`;
   }
   function render() {
     renderChrome(); if(!data)return;

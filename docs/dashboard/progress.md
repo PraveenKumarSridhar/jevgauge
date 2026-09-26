@@ -66,3 +66,10 @@
 - Reproduced SQLite contention with a deterministic slow writer. Schema creation and insert now use one transaction and a shared per-path local writer queue. Direct appends have a bounded 5-second queue; routing telemetry retains a short 250 ms queue wait plus SQLite's 250 ms busy timeout. Separate homes remain independent.
 - Added an installed-plugin regression proving its fallback storage module is initialized once across serial/concurrent callbacks, preserving shared locks. Review independently cross-inspected these fixes.
 - Final local suites after review: 177 passed on Python 3.10.20 (11.26s) and Python 3.11.15 (10.93s). Rebuilt-wheel inspection and installed smoke passed. Remote final platform rerun is tracked on the PR.
+
+## Fresh-context pre-merge evaluation (2026-09-26)
+- User requested a new independent reviewer with no inherited conversation. Reviewer read requirements, code and V5 references, exercised real browser flows and added adversarial regressions.
+- Reproduced and fixed three findings: cross-midnight terminal records inflated next-day conversation activity, published fractional-cent rates were rounded in Details, and the browser hid actionable API error messages.
+- Each finding failed before implementation changed. Request-start attribution now covers conversation activity; rate formatting preserves published precision; bounded API errors render as escaped text with malformed-response fallback. No test assertions weakened.
+- Final local Python: 179 passed in 10.79s. Browser: 16 passed in 7.6s. Original installed-wheel smoke and controlled Hermes opening passed again; updated assets/accounting rebuilt for final wheel checks.
+- Reviewer report: [fresh-evaluation.md](fresh-evaluation.md). Current PR CI is the final remote check; merge remains the user's action.

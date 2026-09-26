@@ -164,7 +164,10 @@ def summarize(events, *, start=None, end=None, timezone='UTC', project=None, pri
                 merged[key] = {**previous, **{k:v for k,v in record.items() if v is not None and (terminal or k not in previous)}}
                 merged[key]['timestamp'] = min(previous['timestamp'],record['timestamp'], key=_timestamp)
         selected = [r for r in merged.values() if in_range(_timestamp(r['timestamp']))]
-        visible_records = [r for r in records if in_range(_timestamp(r['timestamp']))]
+        # Attempt activity belongs to its merged start time. A terminal record
+        # arriving after midnight must not create another day of conversation use.
+        visible_records = [r for r in records if r['kind'] != 'attempt'
+                           and in_range(_timestamp(r['timestamp']))] + selected
         if not selected and not visible_records:
             continue
         issues = set()
