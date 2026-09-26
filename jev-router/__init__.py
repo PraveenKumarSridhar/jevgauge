@@ -31,12 +31,19 @@ DEFAULT_TIERS = {
 EFFORTS = {"low": "low", "medium": "medium", "high": "high"}
 
 
+def _effective_effort(reasoning_config: Any) -> str | None:
+    """Hermes represents explicit reasoning off without an effort key."""
+    if not isinstance(reasoning_config, dict):
+        return None
+    return "none" if reasoning_config.get("enabled") is False else reasoning_config.get("effort")
+
+
 def _default(reason: str, *, model: str, provider: str, reasoning_config: Any,
              user_model: bool, user_reasoning: bool) -> dict:
     return {"metadata": {
         "label": "JevGauge", "status": "unrouted/default", "reason": reason, "policy_version": POLICY_VERSION,
         "model": model, "provider": provider,
-        "reasoning_effort": (reasoning_config or {}).get("effort") if isinstance(reasoning_config, dict) else None,
+        "reasoning_effort": _effective_effort(reasoning_config),
         "owner": {"model": "user" if user_model else "default",
                   "reasoning": "user" if user_reasoning else "default"},
     }}
@@ -188,7 +195,7 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
         confidences = (model_answer["confidence"], effort_answer["confidence"])
         if not all(type(value) in (int, float) and math.isfinite(value) and 0.55 <= value <= 1 for value in confidences):
             raise _Rejected("low Jev confidence")
-        chosen_effort = ((reasoning_config or {}).get("effort") if user_reasoning else EFFORTS[effort_tier])
+        chosen_effort = (_effective_effort(reasoning_config) if user_reasoning else EFFORTS[effort_tier])
         candidates = [model] if user_model else eligible[model_tier]
         chosen = next((candidate for candidate in candidates
                        if chosen_effort in _supported_efforts(provider, candidate)), None)
@@ -196,7 +203,7 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
             raise _Rejected("no supported model and effort pair")
         metadata = {
             "label": "JevGauge", "status": "routed", "reason": f"{model_tier}/{'manual' if user_reasoning else effort_tier}",
-            "policy_version": POLICY_VERSION, "jev_model": answer.get("model") or jev_model,
+            "policy_version": POLICY_VERSION, "jev_model": jev_model,
             "model": chosen, "provider": provider, "reasoning_effort": chosen_effort,
             "candidate_models": eligible, "owner": {
                 "model": "user" if user_model else "router",
@@ -246,6 +253,6 @@ def status(_args: str = "") -> str:
             f"Provider: {config.get('provider') or row.get('billing_provider') or 'profile default'}\n"
             f"Model: {row.get('model') or 'profile default'} "
             f"({(route.get('owner') or {}).get('model', 'default')})\n"
-            f"Effort: {reasoning.get('effort') or 'profile default'} "
+            f"Effort: {_effective_effort(reasoning) or 'profile default'} "
             f"({(route.get('owner') or {}).get('reasoning', 'default')})\n"
             f"Reason: {route.get('reason') or 'no route recorded'}")

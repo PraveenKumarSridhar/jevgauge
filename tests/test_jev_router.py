@@ -242,3 +242,43 @@ def test_http_limits_response_size(monkeypatch):
         monkeypatch.setattr(httpx, 'stream', client.stream)
         with pytest.raises(ValueError, match='size limit'):
             router._request('GET', 'https://example.com', headers={}, limit=10)
+
+
+@pytest.mark.parametrize('manual_mode', [False, True])
+def test_manual_disabled_reasoning_still_selects_compatible_model(manual_mode):
+    result = call(ctx=Config(effort_mode='manual' if manual_mode else 'auto'),
+                  user_reasoning=not manual_mode, reasoning_config={'enabled': False})
+    assert result['model'] == 'gpt-6-luna'
+    assert result['reasoning_effort'] is None
+    assert result['metadata']['reasoning_effort'] == 'none'
+    assert result['metadata']['owner']['reasoning'] == 'user'
+
+
+def test_manual_disabled_reasoning_rejects_incompatible_candidates(monkeypatch):
+    monkeypatch.setattr(router, '_supported_efforts', lambda *a: ('low', 'high'))
+    result = call(user_reasoning=True, reasoning_config={'enabled': False})
+    assert 'model' not in result
+    assert result['metadata']['reasoning_effort'] == 'none'
+    assert result['metadata']['owner']['reasoning'] == 'user'
+
+
+def test_disabled_reasoning_status_is_not_profile_default(monkeypatch):
+    monkeypatch.setattr(router, '_session_record', lambda: {
+        'model': 'gpt-6-luna', 'model_config': {
+            'reasoning_config': {'enabled': False},
+            'session_route': {'owner': {'reasoning': 'user'}}}})
+    assert 'Effort: none (user)' in router.status()
+
+
+@pytest.mark.parametrize('returned_model', [
+    {'echoed_authorization': 'synthetic-api-secret'},
+    ['synthetic-private-prompt'], float('nan'), 'unexpected-remote-model', None,
+])
+def test_response_model_metadata_never_persists_remote_content(monkeypatch, returned_model):
+    monkeypatch.setattr(router, '_decide', lambda *a: {
+        'model': returned_model, 'answers': {
+            'model_tier': {'choice': 'economical', 'confidence': 0.9},
+            'effort_tier': {'choice': 'high', 'confidence': 0.9}}})
+    result = call(ctx=Config(jev_model='jev-configured'))
+    assert result['metadata']['status'] == 'routed'
+    assert result['metadata']['jev_model'] == 'jev-configured'
