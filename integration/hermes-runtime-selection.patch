@@ -323,18 +323,25 @@ index 434697873b..5823734bd1 100644
      fast: bool = False
      yolo: bool = False
 diff --git a/tui_gateway/methods_config_set.py b/tui_gateway/methods_config_set.py
-index 7e5f2d4ffc..d4441c7549 100644
+index 7e5f2d4ffc..35a9e35d7a 100644
 --- a/tui_gateway/methods_config_set.py
 +++ b/tui_gateway/methods_config_set.py
-@@ -321,6 +321,11 @@ def _set_reasoning(rid, params, key, value, session):
+@@ -321,6 +321,18 @@ def _set_reasoning(rid, params, key, value, session):
              session.pop("create_reasoning_override", None)
      else:  # session-scoped like the gateway's `/reasoning <level>`; a menu pick must not rewrite the global
          session["create_reasoning_override"] = parsed
 +    if session is not None:
++        _invalidate_session_route_fallback(session)
 +        session["reasoning_user_owned"] = True
 +        if isinstance(session.get("session_route"), dict):
 +            session["session_route"].setdefault("owner", {})["reasoning"] = "user"
 +            session["session_route"]["reasoning_effort"] = arg
++    if session and session.get("agent") is None:
++        if isinstance(session.get("resume_runtime_overrides"), dict):
++            session["resume_runtime_overrides"]["reasoning_config_override"] = parsed
++        if isinstance(session.get("session_route"), dict):
++            session["create_reasoning_override"] = parsed
++            _publish_deferred_route_runtime(params.get("session_id", ""), session)
      if session and session.get("agent") is not None:
          session["agent"].reasoning_config = parsed
          _persist_live_session_runtime(session)
@@ -370,10 +377,10 @@ index a591a96b97..560c87844a 100644
  
      def claim(self, sid: str, record: dict) -> dict | None:
 diff --git a/tui_gateway/model_switch.py b/tui_gateway/model_switch.py
-index dc2ae3f385..b1d13b9bcb 100644
+index dc2ae3f385..c9b3014c0e 100644
 --- a/tui_gateway/model_switch.py
 +++ b/tui_gateway/model_switch.py
-@@ -250,7 +250,14 @@ def _expensive_model_confirm(result, current_base_url: str, current_api_key, age
+@@ -250,7 +250,25 @@ def _expensive_model_confirm(result, current_base_url: str, current_api_key, age
      return {"value": result.new_model, "warning": msg, "confirm_required": True, "confirm_message": msg}
  
  
@@ -384,15 +391,28 @@ index dc2ae3f385..b1d13b9bcb 100644
 +    return "none" if config.get("enabled") is False else config.get("effort")
 +
 +
++def _invalidate_session_route_fallback(session: dict) -> None:
++    """A manual permanent choice retires the selector's provisional rollback."""
++    agent = session.get("agent")
++    marker = getattr(agent, "_session_route_fallback", None)
++    if isinstance(marker, dict):
++        marker["settle"]()
++    session.pop("route_fallback", None)
++    if isinstance(session.get("session_route"), dict):
++        session["session_route"].pop("original_runtime", None)
++
++
 +def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: str, snapshot,
 +                         reasoning_override=None):
      """Swap the live agent in place, then restart/persist/mark/announce; a failed swap aborts."""
      try:
          agent.switch_model(
-@@ -267,6 +274,18 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model:
+@@ -267,6 +285,20 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model:
          logger.warning("In-place model switch failed for TUI agent: %s", exc)
          raise ValueError(f"Model switch to {result.new_model} failed ({exc}); "
                           f"staying on {getattr(agent, 'model', current_model)}.") from exc
++    if snapshot is None:
++        _invalidate_session_route_fallback(session)
 +    if reasoning_override is not None:
 +        agent.reasoning_config = copy.deepcopy(reasoning_override)
 +    if snapshot is None and isinstance(session.get("session_route"), dict):
@@ -408,7 +428,7 @@ index dc2ae3f385..b1d13b9bcb 100644
      _restart_slash_worker(sid, session)
      _persist_live_session_runtime(session)
      _persist_live_session_system_prompt(session)
-@@ -305,6 +324,23 @@ def _apply_model_switch(
+@@ -305,6 +337,23 @@ def _apply_model_switch(
          custom_providers=custom_provs)
      if not result.success:
          raise ValueError(result.error_message or "model switch failed")
@@ -432,7 +452,7 @@ index dc2ae3f385..b1d13b9bcb 100644
      restore_snapshot = _snapshot_agent_model_runtime(agent) if (one_turn and agent) else None
      if agent:
          _merge_preflight_warning(result, agent, session, cfg, custom_provs)
-@@ -324,7 +360,7 @@ def _apply_model_switch(
+@@ -324,7 +373,7 @@ def _apply_model_switch(
      try:
          if agent:
              # Provenance must exist before this transaction persists the switched runtime.
@@ -441,7 +461,7 @@ index dc2ae3f385..b1d13b9bcb 100644
      except Exception:
          if records_composer_override:
              if had_composer_profile:
-@@ -344,12 +380,55 @@ def _apply_model_switch(
+@@ -344,12 +393,62 @@ def _apply_model_switch(
          persist_model_selection(result)
      if reasoning_effort:
          _apply_switch_reasoning(sid, session, agent, reasoning_effort, persist_global=persist_global, one_turn=one_turn)
@@ -459,6 +479,7 @@ index dc2ae3f385..b1d13b9bcb 100644
  
 +def _finish_deferred_route_switch(sid: str, session: dict, result, reasoning_override) -> None:
 +    """Keep the cold-resume build, saved binding, and panel on the same permanent pair."""
++    _invalidate_session_route_fallback(session)
 +    reasoning = copy.deepcopy(reasoning_override if reasoning_override is not None
 +                              else _load_reasoning_config(result.new_model))
 +    session["create_reasoning_override"] = reasoning
@@ -475,6 +496,12 @@ index dc2ae3f385..b1d13b9bcb 100644
 +    owners["model"] = "user"
 +    if reasoning_override is None:
 +        owners["reasoning"] = "default"
++    _publish_deferred_route_runtime(sid, session)
++
++
++def _publish_deferred_route_runtime(sid: str, session: dict) -> None:
++    """Publish a deferred routed binding after either model or reasoning changes."""
++    route = session["session_route"]
 +    # Persist an existing conversation, but never turn a draft into a saved empty chat.
 +    if key := session.get("session_key"):
 +        db, owns_db = _profile_session_db(session.get("profile_home"))
@@ -490,17 +517,18 @@ index dc2ae3f385..b1d13b9bcb 100644
 +        finally:
 +            if owns_db:
 +                _release_db(db)
-+    _emit("session.info", sid, {"session_route": copy.deepcopy(route), "model": result.new_model,
-+                                "provider": result.target_provider, "reasoning_effort": _switch_effort(reasoning) or ""})
++    _emit("session.info", sid, {"session_route": copy.deepcopy(route), "model": route.get("model") or "",
++                                "provider": route.get("provider") or "", "reasoning_effort": route.get("reasoning_effort") or ""})
 +
 +
  def _apply_switch_reasoning(sid: str, session, agent, effort: str, *, persist_global: bool, one_turn: bool) -> None:
      """``/model X --reasoning <level>``: the effort rides with the pick and shares its scope. Runs
      AFTER ``agent.switch_model`` (which re-resolves ``reasoning_config`` from config.yaml, so an
-@@ -363,6 +442,10 @@ def _apply_switch_reasoning(sid: str, session, agent, effort: str, *, persist_gl
+@@ -363,6 +462,11 @@ def _apply_switch_reasoning(sid: str, session, agent, effort: str, *, persist_gl
          agent.reasoning_config = parsed
      if one_turn or not isinstance(session, dict):
          return
++    _invalidate_session_route_fallback(session)
 +    session["reasoning_user_owned"] = True
 +    if isinstance(session.get("session_route"), dict):
 +        session["session_route"].setdefault("owner", {})["reasoning"] = "user"
@@ -548,7 +576,7 @@ index 035449e2c7..110eac356a 100644
          # roll the client's usage back to a stale snapshot (unbounded join: same worst case).
          _usage_stop.set()
 diff --git a/tui_gateway/server.py b/tui_gateway/server.py
-index e5f5b62b8b..7d2e780e89 100644
+index e5f5b62b8b..9fd834c888 100644
 --- a/tui_gateway/server.py
 +++ b/tui_gateway/server.py
 @@ -1100,6 +1100,10 @@ def _start_agent_build(sid: str, session: dict) -> None:
@@ -562,7 +590,7 @@ index e5f5b62b8b..7d2e780e89 100644
          if ready.is_set() or session.get("agent_build_started"):
              return
          session["agent_build_started"] = True
-@@ -1158,6 +1162,173 @@ def _start_agent_build(sid: str, session: dict) -> None:
+@@ -1158,6 +1162,176 @@ def _start_agent_build(sid: str, session: dict) -> None:
      build_thread.start()
  
  
@@ -620,8 +648,7 @@ index e5f5b62b8b..7d2e780e89 100644
 +                    continue
 +            effective_model = model if model and not session.get("model_override") else current_model
 +            effective_provider = provider if model and not session.get("model_override") else current_provider
-+            effective_effort = effort if effort and not user_reasoning else (
-+                current_reasoning.get("effort") if isinstance(current_reasoning, dict) else None)
++            effective_effort = effort if effort and not user_reasoning else _switch_effort(current_reasoning)
 +            if model:
 +                from hermes_cli.models_validate import static_model_provider_conflict
 +                if static_model_provider_conflict(effective_model, effective_provider):
@@ -653,7 +680,7 @@ index e5f5b62b8b..7d2e780e89 100644
 +                report_status({**session["session_route"], "status": "unrouted/default",
 +                               "reason": "No valid routing decision", "model": current_model,
 +                               "provider": current_provider,
-+                               "reasoning_effort": (current_reasoning or {}).get("effort")})
++                               "reasoning_effort": _switch_effort(current_reasoning)})
 +
 +
 +def _arm_first_call_route_fallback(session: dict, agent, sid: str = "") -> None:
@@ -668,8 +695,8 @@ index e5f5b62b8b..7d2e780e89 100644
 +            not original.get("model") or not original.get("provider")):
 +        return
 +    same_model = (agent.model, agent.provider) == (original["model"], original["provider"])
-+    original_effort = (original.get("reasoning_config") or {}).get("effort")
-+    if same_model and (agent.reasoning_config or {}).get("effort") == original_effort:
++    original_effort = _switch_effort(original.get("reasoning_config"))
++    if same_model and _switch_effort(agent.reasoning_config) == original_effort:
 +        return
 +    if getattr(agent, "_session_route_fallback", None):
 +        return
@@ -694,6 +721,8 @@ index e5f5b62b8b..7d2e780e89 100644
 +        agent._session_route_fallback = None
 +
 +    def on_fallback() -> None:
++        if marker["settled"]:
++            return
 +        marker["used"] = True
 +        session["model_override"] = target.copy()
 +        if isinstance(original.get("reasoning_config"), dict):
@@ -704,7 +733,7 @@ index e5f5b62b8b..7d2e780e89 100644
 +            agent.reasoning_config = original.get("reasoning_config")
 +        route.update(status="unrouted/default", reason="first-call candidate rejected",
 +                     model=agent.model, provider=agent.provider,
-+                     reasoning_effort=(agent.reasoning_config or {}).get("effort"))
++                     reasoning_effort=_switch_effort(agent.reasoning_config))
 +        owners = route.setdefault("owner", {})
 +        for field in ("model", "reasoning"):
 +            if owners.get(field) == "router":
@@ -720,6 +749,8 @@ index e5f5b62b8b..7d2e780e89 100644
 +                       (agent.reasoning_config or {}).get("effort"))
 +
 +    def may_fallback() -> bool:
++        if marker["settled"]:
++            return False
 +        if marker["output_seen"]:
 +            agent._fallback_chain = []
 +            agent._fallback_index = 0
@@ -736,7 +767,7 @@ index e5f5b62b8b..7d2e780e89 100644
  def _sess_nowait(params, rid):
      sid = params.get("session_id") or ""
      s = _sessions.get(sid)
-@@ -1645,6 +1816,8 @@ def _persist_live_session_runtime(session: dict | None) -> None:
+@@ -1645,6 +1819,8 @@ def _persist_live_session_runtime(session: dict | None) -> None:
              model_config["composer_override_profile"] = composer_profile
          elif "composer_override_profile" in session:
              model_config.pop("composer_override_profile", None)
@@ -745,7 +776,7 @@ index e5f5b62b8b..7d2e780e89 100644
          if (tier_override := session.get("create_service_tier_override")) is not None:
              # agent.service_tier is None for explicit normal; without this the distinction is erased on every persist.
              model_config["service_tier"] = tier_override or "normal"
-@@ -2218,6 +2391,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
+@@ -2218,6 +2394,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
          "usage": _session_usage_snapshot(session),
          "profile_name": profile_name_for_home(sess.get("profile_home")) or _current_profile_name(),
      }
@@ -754,7 +785,7 @@ index e5f5b62b8b..7d2e780e89 100644
      with contextlib.suppress(Exception):
          from hermes_cli import __release_date__
          from hermes_cli.version_info import get_version_info
-@@ -2709,6 +2884,14 @@ def _schedule_agent_build(sid: str, delay: float = 0.05) -> None:
+@@ -2709,6 +2887,14 @@ def _schedule_agent_build(sid: str, delay: float = 0.05) -> None:
  
      def _run():
          if (session := _sessions.get(sid)) is not None:
@@ -784,10 +815,10 @@ index c95a0d8489..9b1780d49c 100644
          # durable marker so resume can tell it from an inherited tier.
 diff --git a/apps/desktop/src/app/chat/session-route-panel.tsx b/apps/desktop/src/app/chat/session-route-panel.tsx
 new file mode 100644
-index 0000000000..35b3dabbeb
+index 0000000000..b830eb09ae
 --- /dev/null
 +++ b/apps/desktop/src/app/chat/session-route-panel.tsx
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,100 @@
 +import { useStore } from '@nanostores/react'
 +import { computed } from 'nanostores'
 +import { useMemo } from 'react'
@@ -842,13 +873,19 @@ index 0000000000..35b3dabbeb
 +            <div className="mt-3 grid grid-cols-2 gap-4">
 +              <div>
 +                <div className="text-xs opacity-50">
-+                  MODEL · {owner.model === 'user' ? 'MANUAL' : fallback ? 'DEFAULT' : 'AUTO'}
++                  MODEL ·{' '}
++                  {owner.model === 'user' ? 'MANUAL' : owner.model === 'default' || fallback ? 'DEFAULT' : 'AUTO'}
 +                </div>
 +                <div className="mt-1 truncate font-mono text-sm">{text(route.model, 'Profile default')}</div>
 +              </div>
 +              <div>
 +                <div className="text-xs opacity-50">
-+                  REASONING · {owner.reasoning === 'user' ? 'MANUAL' : fallback ? 'DEFAULT' : 'AUTO'}
++                  REASONING ·{' '}
++                  {owner.reasoning === 'user'
++                    ? 'MANUAL'
++                    : owner.reasoning === 'default' || fallback
++                      ? 'DEFAULT'
++                      : 'AUTO'}
 +                </div>
 +                <div className="mt-1 flex items-center gap-3 font-mono text-sm">
 +                  <span className="capitalize">{effort}</span>
@@ -884,10 +921,10 @@ index 0000000000..35b3dabbeb
 +}
 diff --git a/apps/desktop/src/app/chat/session-route-panel.test.tsx b/apps/desktop/src/app/chat/session-route-panel.test.tsx
 new file mode 100644
-index 0000000000..c5e081dbdf
+index 0000000000..021e8e4135
 --- /dev/null
 +++ b/apps/desktop/src/app/chat/session-route-panel.test.tsx
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,56 @@
 +import { fireEvent, render, screen } from '@testing-library/react'
 +import { describe, expect, it } from 'vitest'
 +
@@ -928,6 +965,20 @@ index 0000000000..c5e081dbdf
 +    expect(screen.getByText('● DEFAULTS RETAINED')).toBeTruthy()
 +    rerender(<RouteDecision route={null} />)
 +    expect(screen.queryByLabelText('Session routing')).toBeNull()
++  })
++  it('labels a profile-owned effort as default after a manual model switch', () => {
++    render(
++      <RouteDecision
++        route={{
++          status: 'routed',
++          model: 'manual-model',
++          reasoning_effort: 'high',
++          owner: { model: 'user', reasoning: 'default' }
++        }}
++      />
++    )
++    expect(screen.getByText('MODEL · MANUAL')).toBeTruthy()
++    expect(screen.getByText('REASONING · DEFAULT')).toBeTruthy()
 +  })
 +})
 diff --git a/apps/desktop/src/store/session-route-display.ts b/apps/desktop/src/store/session-route-display.ts
@@ -1100,10 +1151,10 @@ index 0000000000..c41c460813
 +    assert agent._session_route_fallback is None
 diff --git a/tests/tui_gateway/test_first_prompt_route_hook.py b/tests/tui_gateway/test_first_prompt_route_hook.py
 new file mode 100644
-index 0000000000..f21da8b9d8
+index 0000000000..74dc82e238
 --- /dev/null
 +++ b/tests/tui_gateway/test_first_prompt_route_hook.py
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,252 @@
 +"""A Desktop first-message route must bind before the deferred agent is built."""
 +
 +import threading
@@ -1320,12 +1371,48 @@ index 0000000000..f21da8b9d8
 +    assert events[-1]["session_route"]["status"] == "unrouted/default"
 +    assert not session.get("model_override")
 +    assert not session.get("create_reasoning_override")
++
++
++def test_manual_reasoning_off_is_validated_and_reported(monkeypatch):
++    from tui_gateway import server
++    monkeypatch.setattr("hermes_cli.plugins.has_hook", lambda name: True)
++    for model in ("gpt-6-sol", "gpt-6-astra"):
++        session = {"source": "desktop", "history": [], "agent": None,
++                   "reasoning_user_owned": True, "create_reasoning_override": {"enabled": False}}
++        def decide(_name, **kw):
++            kw["report_status"]({"status": "selecting"})
++            return [{"model": model, "provider": "openai-codex",
++                     "metadata": {"status": "routed", "reasoning_effort": "none"}}]
++        monkeypatch.setattr("hermes_cli.plugins.invoke_hook", decide)
++        server._apply_first_prompt_route(session, "Transform this")
++        assert session["session_route"]["reasoning_effort"] == "none"
++        assert session["create_reasoning_override"] == {"enabled": False}
++        if model == "gpt-6-astra":
++            assert not session.get("model_override")
++            assert session["session_route"]["status"] == "unrouted/default"
++        else:
++            assert session["model_override"]["model"] == model
++
++
++def test_fallback_distinguishes_reasoning_off_from_unset(monkeypatch):
++    from types import SimpleNamespace
++    from tui_gateway import server
++    session = {"source": "desktop", "history": [], "session_route": {"status": "routed"},
++               "route_fallback": {"model": "gpt-6-sol", "provider": "openai-codex",
++                                  "reasoning_config": {"enabled": False}}}
++    agent = SimpleNamespace(model="gpt-6-sol", provider="openai-codex", reasoning_config=None, _fallback_chain=[])
++    monkeypatch.setattr(server, "_persist_live_session_runtime", lambda record: None)
++    server._arm_first_call_route_fallback(session, agent)
++    assert agent._session_route_fallback["effort_only"]
++    agent._session_route_fallback["on_fallback"]()
++    assert agent.reasoning_config == {"enabled": False}
++    assert session["session_route"]["reasoning_effort"] == "none"
 diff --git a/tests/tui_gateway/test_route_manual_switch.py b/tests/tui_gateway/test_route_manual_switch.py
 new file mode 100644
-index 0000000000..500387a630
+index 0000000000..38ff22f917
 --- /dev/null
 +++ b/tests/tui_gateway/test_route_manual_switch.py
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,174 @@
 +"""Permanent model changes retain explicit effort and publish the effective route."""
 +import copy
 +from types import SimpleNamespace
@@ -1448,3 +1535,55 @@ index 0000000000..500387a630
 +    assert restored["provider_override"] == "openai-codex"
 +    assert (restored.get("reasoning_config_override") or {}).get("effort") == expected
 +    assert restored["service_tier_override"] == "priority"
++
++
++@pytest.mark.parametrize("field", ["model", "reasoning"])
++def test_late_manual_choice_disarms_provisional_route_fallback(switch_case, field):
++    agent, session, _, _, _ = switch_case
++    session["history"] = []
++    session["session_route"].update(status="routed", owner={"model": "router", "reasoning": "router"})
++    original = {"model": "gpt-6-astra", "provider": "openai-codex", "reasoning_config": {"effort": "medium"}}
++    session["route_fallback"] = original
++    session["session_route"]["original_runtime"] = original
++    ordinary_chain = [{"model": "ordinary-fallback", "provider": "openai-codex"}]
++    agent._fallback_chain = ordinary_chain.copy()
++    server._arm_first_call_route_fallback(session, agent)
++    assert agent._session_route_fallback is not None
++    if field == "model":
++        server._apply_model_switch("s", session, "gpt-6-sol --session", confirm_expensive_model=True)
++    else:
++        server._set_reasoning("id", {"session_id": "s"}, "reasoning", "high", session)
++    assert agent._session_route_fallback is None
++    assert agent._fallback_chain == ordinary_chain
++    assert "route_fallback" not in session
++    assert "original_runtime" not in session["session_route"]
++    server._arm_first_call_route_fallback(session, agent)
++    assert agent._session_route_fallback is None
++
++
++def test_deferred_reasoning_choice_updates_resume_and_saved_binding(monkeypatch):
++    import json
++    model = {"model": "gpt-6-luna", "provider": "openai-codex"}
++    original = {"model": "gpt-6-sol", "provider": "openai-codex", "reasoning_config": {"effort": "medium"}}
++    session = {"agent": None, "session_key": "saved", "model_override": model,
++               "resume_runtime_overrides": {"model_override": model, "provider_override": "openai-codex",
++                                            "reasoning_config_override": {"effort": "low"}},
++               "session_route": {**model, "reasoning_effort": "low", "original_runtime": original,
++                                 "owner": {"model": "router", "reasoning": "router"}}, "route_fallback": original}
++    row = {"model": model["model"], "model_config": json.dumps({"session_route": session["session_route"],
++                                                                "reasoning_config": {"effort": "low"}})}
++    class DB:
++        def get_session(self, key):
++            return row
++        def update_session_meta(self, key, config, model):
++            row.update(model=model, model_config=config)
++    monkeypatch.setattr(server, "_profile_session_db", lambda *a: (DB(), False))
++    emitted = []
++    monkeypatch.setattr(server, "_emit", lambda kind, sid, payload: emitted.append(payload))
++    server._set_reasoning("id", {"session_id": "s"}, "reasoning", "high", session)
++    assert server._deferred_build_agent_kwargs(session, None)["reasoning_config_override"]["effort"] == "high"
++    saved = json.loads(row["model_config"])
++    assert saved["reasoning_config"]["effort"] == "high"
++    assert "original_runtime" not in saved["session_route"]
++    assert saved["session_route"]["owner"] == {"model": "router", "reasoning": "user"}
++    assert emitted[-1]["session_route"]["reasoning_effort"] == "high"
