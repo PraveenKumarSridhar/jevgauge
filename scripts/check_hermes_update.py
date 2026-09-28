@@ -84,11 +84,15 @@ def load_config(path, *, content=None):
         if any(not isinstance(v, str) or not v or v.startswith('-') for v in candidate.values()):
             raise ValueError('Invalid candidate name/ref')
     for patch in data['patches']:
-        if not isinstance(patch, dict) or set(patch) != {'path', 'exclude'}:
+        if (not isinstance(patch, dict) or
+                set(patch) not in ({'path', 'exclude'}, {'path', 'exclude', 'context_lines'})):
             raise ValueError('Invalid patch specification')
         relative_path(patch['path'])
         if not isinstance(patch['exclude'], list):
             raise ValueError('Patch excludes must be a list')
+        if (type(patch.get('context_lines', 3)) is not int or
+                not 1 <= patch.get('context_lines', 3) <= 3):
+            raise ValueError('Patch context_lines must be between 1 and 3')
         for excluded in patch['exclude']:
             relative_path(excluded)
     destinations = set()
@@ -295,7 +299,8 @@ def verify(source, ref, python, output_parent, config_path=DEFAULT_CONFIG, *, al
             for index, patch in enumerate(config['patches']):
                 staged_patch = scratch / f'integration-{index}.patch'
                 staged_patch.write_bytes(inputs[patch['path']])
-                command = ['git', 'apply'] + ['--exclude=' + x for x in patch['exclude']]
+                command = ['git', 'apply', '-C', str(patch.get('context_lines', 3))]
+                command += ['--exclude=' + x for x in patch['exclude']]
                 try:
                     run(command + ['--check', str(staged_patch)], cwd=repo, env=env, timeout=timeout, log=log)
                 except RuntimeError:

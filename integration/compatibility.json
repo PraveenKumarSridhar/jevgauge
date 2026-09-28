@@ -13,6 +13,7 @@
   ],
   "patches": [
     {"path": "integration/hermes-runtime-selection.patch", "exclude": ["apps/desktop/*"]},
+    {"path": "integration/hermes-runtime-drift.patch", "exclude": [], "context_lines": 1},
     {"path": "integration/hermes-runtime-read.patch", "exclude": []}
   ],
   "fixtures": [

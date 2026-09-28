@@ -35,6 +35,8 @@ The native indicator displays `Jev: unavailable` if the backend lacks the read c
 
 `integration/compatibility.json` lists candidate refs, the reviewed patch base, ordered patches and required lifecycle tests. CI reads this same manifest. Locally, use a separate Hermes checkout and interpreter:
 
+The small `hermes-runtime-drift.patch` holds only the insertion sites whose nearby Hermes code changed. Its explicit one-line context setting is paired with the required lifecycle gate. A clean application alone is never an acceptance decision.
+
 ```sh
 python scripts/check_hermes_update.py \
   --hermes-repo /path/to/candidate/hermes-agent \

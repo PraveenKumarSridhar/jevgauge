@@ -162,6 +162,33 @@ def test_patch_rejection_leaves_source_untouched(candidate):
     assert (source / 'target').read_text() == 'before\n'
 
 
+def test_explicit_context_floor_applies_one_context_patch(candidate):
+    root, source, config_path, _ = candidate
+    (source / 'target').write_text('first\nbefore\nlast\n')
+    commit(source)
+    (root / 'change.patch').write_text(
+        'diff --git a/target b/target\n--- a/target\n+++ b/target\n'
+        '@@ -1,2 +1,3 @@\n first\n before\n+after\n')
+    config = json.loads(config_path.read_text())
+    config['patches'][0]['context_lines'] = 1
+    config_path.write_text(json.dumps(config))
+    (source / 'tests/test_probe.py').write_text(
+        "from pathlib import Path\n"
+        "def test_probe(): assert Path('target').read_text() == 'first\\nbefore\\nafter\\nlast\\n'\n")
+    commit(source)
+    evidence, receipt = execute(candidate)
+    assert receipt['status'] == 'backend-tests-passed', (evidence / 'check.log').read_text()
+
+
+def test_invalid_context_floor_is_rejected(candidate):
+    _, _, config_path, _ = candidate
+    config = json.loads(config_path.read_text())
+    config['patches'][0]['context_lines'] = 0
+    config_path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match='context_lines'):
+        check.load_config(config_path)
+
+
 def three_way_candidate(candidate, upstream_value):
     root, source, config_path, _ = candidate
     (source / 'target').write_text('one\nmiddle\nthree\n')
