@@ -6,7 +6,7 @@ Automatic first-call routing still needs Hermes to expose an early host-owned co
 
 | Contract | Scope | Selection |
 |---|---|---|
-| Native `turn_route` middleware plus `session.turn_route.read` | Addressed Desktop profiles | Model/provider binding. Existing reasoning is preserved |
+| Versioned native `turn_route` middleware plus `session.turn_route.read` | Addressed Desktop profiles | Host-validated model and reasoning binding |
 | Legacy `SESSION_RUNTIME_SELECTION_API = 1` development integration | Desktop launch profile | Model/provider and reasoning binding |
 
 Run this before installation:

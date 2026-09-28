@@ -16,7 +16,7 @@ def installation(tmp_path, monkeypatch):
     plugins = repo / 'hermes_cli/plugins.py'
     plugins.write_text(plugins.read_text() + '\ndef get_secret(): pass\nPROVIDER_ATTEMPT_API = 1\n')
     middleware = repo / 'hermes_cli/middleware.py'
-    middleware.write_text('TURN_ROUTE_MIDDLEWARE = "turn_route"\nVALID_MIDDLEWARE = {TURN_ROUTE_MIDDLEWARE}\ndef apply_turn_route_middleware(): pass\n')
+    middleware.write_text('TURN_ROUTE_MIDDLEWARE = "turn_route"\nTURN_ROUTE_API_VERSION = 1\nVALID_MIDDLEWARE = {TURN_ROUTE_MIDDLEWARE}\ndef apply_turn_route_middleware(): pass\n')
     resolver = repo / 'hermes_cli/turn_routing.py'
     resolver.write_text('def resolve_turn_route(): pass\n')
     read_api = repo / 'tui_gateway/methods_turn_route.py'
@@ -81,6 +81,14 @@ def test_native_contract_requires_public_profile_secret_reader(installation):
     repo, home = installation
     plugins = repo / 'hermes_cli/plugins.py'
     plugins.write_text(plugins.read_text().replace('def get_secret(): pass\n', ''))
+    assert run(installation, 'doctor') == 1
+    assert not home.exists()
+
+
+def test_native_contract_requires_versioned_reasoning_binding(installation):
+    repo, home = installation
+    middleware = repo / 'hermes_cli/middleware.py'
+    middleware.write_text(middleware.read_text().replace('TURN_ROUTE_API_VERSION = 1\n', ''))
     assert run(installation, 'doctor') == 1
     assert not home.exists()
 

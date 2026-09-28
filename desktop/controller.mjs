@@ -43,14 +43,14 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
     if (data.status==='pending') {show('Jev: choosing','Selecting this conversation’s model.'); return;}
     if (data.status==='unrecorded') {show('Jev: unrecorded','This conversation predates durable route bindings.'); return;}
     if (!['default','routed','user'].includes(data.status)) {unavailable(); return;}
-    if (data.status==='routed' && (!Array.isArray(data.middleware_plugins) || !data.middleware_plugins.includes('jev-router'))) {
+    if (data.status!=='user' && (!Array.isArray(data.middleware_plugins) || !data.middleware_plugins.includes('jev-router'))) {
       unavailable(); return;
     }
-    const model=routeLabel(data.model);
+    const model=routeLabel(data.model), effort=effortValues.includes(data.reasoning_effort) ? data.reasoning_effort : null;
     if (!model) {unavailable(); return;}
     const manual=data.status==='user' || data.owner==='user';
     const suffix=manual ? ' (manual)' : data.status==='default' ? ' (default)' : '';
-    show(`Jev: ${model}${suffix}`,
+    show(`Jev: ${model}${effort ? ' · '+effort : ''}${suffix}`,
       `Live session binding${manual ? ' with manual override' : ''}. Provider: ${routeLabel(data.requested_provider) || routeLabel(data.provider) || 'unknown'}. Provider execution is not verified by this display.`);
   }
   function render(data, captured) {

@@ -170,7 +170,7 @@ One Jev request sends **up to the first 1,200 characters of the first substantiv
 
 No attachments, later conversation history, tool results, or ChatGPT credentials are included. Your TypeSafe key goes in the authorization header. Account discovery uses your existing authenticated Hermes route. Custom endpoints must use HTTPS.
 
-The native host stores an allowlisted model/provider binding. The legacy integration also stores effort, owners, candidate set, versions, and policy reason with the conversation. Neither route logs the prompt or dependency exception text.
+The native host stores an allowlisted model/reasoning binding with per-field ownership and a bounded reason code. The legacy integration also stores the candidate set, versions, and policy reason with the conversation. Neither route logs the prompt or dependency exception text.
 
 ## Development
 

@@ -89,6 +89,7 @@ def _routing_contract(repo: Path, plugins_tree: ast.AST) -> str | None:
     native = (
         middleware is not None
         and _assigned_constant(middleware, 'TURN_ROUTE_MIDDLEWARE', 'turn_route')
+        and _assigned_constant(middleware, 'TURN_ROUTE_API_VERSION', 1)
         and 'apply_turn_route_middleware' in middleware_symbols
         and 'resolve_turn_route' in resolver_symbols
         and read_api is not None

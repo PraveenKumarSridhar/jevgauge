@@ -21,7 +21,7 @@ JevGauge consumes this contract from its own repository. It does not install or 
 
 | Open proposal | Reusable boundary | Remaining gap |
 |---|---|---|
-| [#98703, pre-agent `turn_route`](https://github.com/NousResearch/hermes-agent/pull/98703), head `9eaa6dd8` at inspection | Public model/provider routing before agent construction; credentials stay host-owned | Desktop `tui_gateway` lifecycle, durable first-conversation binding, cold resume, and addressed read |
+| [#98703, pre-agent `turn_route`](https://github.com/NousResearch/hermes-agent/pull/98703), head `9eaa6dd8` at inspection | Public routing before agent construction; credentials stay host-owned | Desktop `tui_gateway` lifecycle, bounded reasoning selection, durable first-conversation binding, cold resume, and addressed read |
 | [#118985, reasoning-effort policy](https://github.com/NousResearch/hermes-agent/pull/118985), head `8e38508f` at inspection | Host-bounded effort vocabulary and persistence | Separate from model routing and not merged at inspection |
 | [#99053, `pre_llm_call` model override](https://github.com/NousResearch/hermes-agent/pull/99053), head `1e9c0bda` at inspection | Model override for an imminent call | Runs too late for a durable Desktop session binding |
 | [#119031, Jev adaptive effort catalog entry](https://github.com/NousResearch/hermes-agent/pull/119031), head `90629d8f` at inspection | Jev effort policy | Effort only; does not select a model |
@@ -41,7 +41,7 @@ The implementation extends #98703 instead of creating a competing route mechanis
 
 ### Durable binding
 
-Hermes writes an allowlisted `hermes.turn_route.binding.v1` value into the session row before building the agent. It contains status, owner, public model/provider fields, and bounded middleware manifest names. It excludes API keys, base URLs, prompt text, plugin explanations, arbitrary metadata, and raw callback output.
+Hermes writes an allowlisted `hermes.turn_route.binding.v1` value into the session row before building the agent. It contains status, model and reasoning ownership, public model/provider fields, a bounded reasoning effort, middleware manifest names, and an optional machine-readable reason code. It excludes API keys, base URLs, prompt text, plugin explanations, arbitrary metadata, and raw callback output.
 
 Cold resume restores the committed runtime and binding without rerunning middleware. Explicit model changes move ownership to the user.
 
@@ -60,7 +60,7 @@ The result is selection evidence. It does not prove a physical provider attempt,
 
 ## JevGauge migration
 
-The repo-owned plugin now registers native `turn_route` middleware when the host supports it and retains `select_session_runtime` as a legacy fallback. Under the native contract it changes only model/provider, preserves Hermes reasoning, reads its TypeSafe token through `PluginContext.get_secret`, and lets the host validate configured candidates. It no longer imports Hermes private account-catalog or credential helpers on that path. The Desktop indicator reads `session.turn_route.read` first, then falls back to the legacy `session.runtime_selection` RPC.
+The repo-owned plugin now registers native `turn_route` middleware when the host exposes `TURN_ROUTE_API_VERSION = 1` and retains `select_session_runtime` as a legacy fallback. Under the native contract it selects model and reasoning independently, reads its TypeSafe token through `PluginContext.get_secret`, and lets the host validate the selected pair. It no longer imports Hermes private account-catalog or credential helpers on that path. The Desktop indicator reads `session.turn_route.read` first, then falls back to the legacy `session.runtime_selection` RPC.
 
 The installer accepts either complete contract and rejects partial marker-only hosts. Provider-attempt telemetry is optional, so missing dashboard evidence does not disable model routing.
 

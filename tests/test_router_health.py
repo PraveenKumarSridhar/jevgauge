@@ -36,6 +36,7 @@ def command(monkeypatch):
     host.VALID_HOOKS = {'select_session_runtime', 'provider_attempt'}
     middleware = ModuleType('hermes_cli.middleware')
     middleware.VALID_MIDDLEWARE = {'turn_route'}
+    middleware.TURN_ROUTE_API_VERSION = 1
     parent.middleware = middleware
     # Registration alone is not evidence that the host invokes a hook.
     host.has_hook = lambda name: True

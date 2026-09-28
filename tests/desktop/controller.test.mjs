@@ -23,7 +23,8 @@ function setup() {
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const response = (overrides={}) => ({schema_version:'hermes.turn_route.binding.v1', session_id:'runtime', stored_session_id:'durable',
   evidence:'session_binding', status:'routed', model:'gpt-6-luna', provider:'openai-codex',
-  requested_provider:'openai-codex', owner:'middleware', middleware_plugins:['jev-router'], ...overrides});
+  requested_provider:'openai-codex', owner:'middleware', middleware_plugins:['jev-router'],
+  reasoning_effort:'low', reasoning_owner:'middleware', middleware_reason:'economical/low', ...overrides});
 const legacyResponse = (overrides={}) => ({schema_version:1, session_id:'runtime', stored_session_id:'durable',
   selection_api:1, telemetry_api:1, evidence:'session_binding', scope_supported:true, status:'routed', model:'gpt-6-luna',
   provider:'openai-codex', reasoning_effort:'low', owner:{model:'router',reasoning:'router'}, ...overrides});
@@ -33,7 +34,7 @@ test('uses exact connection-qualified route and displays selected pair', async (
   assert.equal(t.calls[0].method,'session.turn_route.read');
   assert.deepEqual(t.calls[0].params,{session_id:'runtime',stored_session_id:'durable'});
   assert.equal(t.calls[0].route,t.routes[0]); t.calls[0].resolve(response()); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna'); t.controller.dispose();
+  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna · low'); t.controller.dispose();
 });
 test('focus change clears immediately and rejects late response even with identical IDs', async () => {
   const t=setup(); await flush(); t.calls[0].resolve(response()); await flush();
@@ -43,7 +44,7 @@ test('focus change clears immediately and rejects late response even with identi
   assert.equal(t.calls.at(-1).route,t.routes[2]); old.resolve(response({model:'foreign'})); await flush();
   assert.equal(t.updates.at(-1).label,'Jev: checking');
   t.calls.at(-1).resolve(response({model:'remote-model'})); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: remote-model'); t.controller.dispose();
+  assert.equal(t.updates.at(-1).label,'Jev: remote-model · low'); t.controller.dispose();
 });
 test('unknown ownership performs no request and removes previous route', async () => {
   const t=setup(); await flush(); t.calls[0].resolve(response()); await flush();
@@ -112,13 +113,13 @@ test('an event during an older read queues exactly one follow-up', async () => {
   t.calls[0].resolve(response({status:'pending'})); await flush();
   assert.equal(t.calls.length,2); assert.equal(t.updates.at(-1).label,'Jev: choosing');
   t.calls[1].resolve(response()); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna');
+  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna · low');
   assert.equal(t.calls.length,2); t.controller.dispose();
 });
 
 test('native user ownership is shown as manual and unrelated middleware is not claimed as Jev', async () => {
   const t=setup(); await flush(); t.calls[0].resolve(response({status:'user',owner:'user'})); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna (manual)');
+  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna · low (manual)');
   t.controller.refresh(); await flush(); t.calls.at(-1).resolve(response({middleware_plugins:['other-router']})); await flush();
   assert.equal(t.updates.at(-1).label,'Jev: unavailable'); t.controller.dispose();
 });

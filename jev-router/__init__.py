@@ -212,13 +212,14 @@ def route(**kwargs):
 
 def _route(*, ctx, message: str, source: str, provider: str, model: str,
           reasoning_config: Any, user_model: bool, user_reasoning: bool,
-          model_only: bool = False, **_kw) -> dict | None:
+          model_only: bool = False, host_validates: bool = False, **_kw) -> dict | None:
     if source != "desktop" or provider != "openai-codex" or not ctx.get_config("enabled", False):
         return None
     user_reasoning = user_reasoning or ctx.get_config("effort_mode", "auto") == "manual"
     kwargs = dict(ctx=ctx, message=message, provider=provider, model=model,
                   reasoning_config=reasoning_config, user_model=user_model,
-                  user_reasoning=user_reasoning, model_only=model_only)
+                  user_reasoning=user_reasoning, model_only=model_only,
+                  host_validates=host_validates)
     def default(reason):
         return _default(reason, model=model, provider=provider, reasoning_config=reasoning_config,
                         user_model=user_model, user_reasoning=user_reasoning)
@@ -264,7 +265,7 @@ def _route(*, ctx, message: str, source: str, provider: str, model: str,
 
 
 def _select(*, ctx, message, provider, model, reasoning_config, user_model, user_reasoning,
-            model_only=False):
+            model_only=False, host_validates=False):
     # A persistent manual mode leaves the profile's reasoning effort in charge for new chats.
     user_reasoning = user_reasoning or ctx.get_config("effort_mode", "auto") == "manual"
     api_key = _get_secret(ctx)
@@ -277,7 +278,7 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
         tiers = ctx.get_config("tier_models", DEFAULT_TIERS)
         if not isinstance(tiers, dict):
             raise _Rejected("invalid tier mapping")
-        live = None if model_only else set(_live_models())
+        live = None if model_only or host_validates else set(_live_models())
         eligible = {
             tier: [
                 candidate.strip() for candidate in options
@@ -306,7 +307,7 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
         chosen_effort = None if model_only else (
             _effective_effort(reasoning_config) if user_reasoning else EFFORTS[effort_tier])
         candidates = [model] if user_model else eligible[model_tier]
-        chosen = (candidates[0] if candidates else None) if model_only else next(
+        chosen = (candidates[0] if candidates else None) if model_only or host_validates else next(
             (candidate for candidate in candidates
              if chosen_effort in _supported_efforts(provider, candidate)), None)
         if not chosen:
@@ -336,36 +337,54 @@ def turn_route(*, ctx, route: dict, user_message: str, source: str,
                tool_continuation: bool = False, **kwargs) -> dict | None:
     """Adapt Jev to Hermes' credential-free, pre-agent ``turn_route`` contract."""
     if (source != "desktop" or internal or tool_continuation or not is_first_turn
+            or not ctx.get_config("enabled", False)
             or not isinstance(route, dict)):
         return None
     model = route.get("model")
     provider = route.get("requested_provider") or route.get("provider")
     if not isinstance(model, str) or not model.strip() or provider != "openai-codex":
         return None
+    current_effort = route.get("current_reasoning_effort")
+    reasoning_config = (
+        {"enabled": False}
+        if current_effort == "none"
+        else ({"enabled": True, "effort": current_effort}
+              if current_effort in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+              else None)
+    )
     result = globals()["route"](
         ctx=ctx,
         message=user_message if isinstance(user_message, str) else "",
         source=source,
         provider=provider,
         model=model,
-        reasoning_config=None,
+        reasoning_config=reasoning_config,
         user_model=False,
         user_reasoning=False,
-        model_only=True,
+        host_validates=True,
         session_key=kwargs.get("session_key"),
     )
     metadata = (result or {}).get("metadata", {})
     selected = metadata.get("model")
     if metadata.get("status") != "routed" or not isinstance(selected, str) or not selected:
-        return None
+        raw_reason = str(metadata.get("reason") or "default")[:64]
+        reason = "_".join(raw_reason.split())
+        reason = "".join(char for char in reason if char.isalnum() or char in "_.:/-") or "default"
+        return {"route": dict(route), "source": "jevgauge", "status": "default", "reason": reason}
     public_route = dict(route)
     public_route["model"] = selected
+    chosen_effort = result.get("reasoning_effort")
+    if isinstance(chosen_effort, str) and chosen_effort:
+        public_route["reasoning_effort"] = chosen_effort
+    if result.get("preserve_reasoning") is True:
+        public_route["preserve_reasoning"] = True
     public_route["requested_provider"] = provider
     if isinstance(route.get("runtime"), dict):
         public_route["runtime"] = {**route["runtime"], "requested_provider": provider}
     return {
         "route": public_route,
         "source": "jevgauge",
+        "status": "routed",
         "reason": str(metadata.get("model_tier") or "selected")[:64],
     }
 
@@ -470,13 +489,17 @@ def _contract_status(host, marker: str, hook: str) -> dict:
 
 
 def _turn_route_status(host) -> dict:
+    version = getattr(host, "TURN_ROUTE_API_VERSION", None)
     kinds = getattr(host, "VALID_MIDDLEWARE", ())
     declared = isinstance(kinds, (set, frozenset, list, tuple)) and "turn_route" in kinds
-    if declared:
+    supported = type(version) is int and version == 1
+    if declared and supported:
         return {"status": "available", "reason": "host contract declared",
-                "api_version": 1, "contract": "turn_route", "scope": "addressed_profile"}
-    return {"status": "unavailable", "reason": "host integration missing",
-            "api_version": None, "contract": None, "scope": "unknown"}
+                "api_version": version, "contract": "turn_route", "scope": "addressed_profile"}
+    reason = "unsupported host integration version" if version is not None and not supported else "host integration missing"
+    return {"status": "unavailable", "reason": reason,
+            "api_version": version if type(version) is int else None,
+            "contract": None, "scope": "unknown"}
 
 
 def runtime_health(ctx=None) -> dict:

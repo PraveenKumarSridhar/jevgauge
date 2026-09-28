@@ -59,15 +59,16 @@ def test_model_and_effort_are_independent():
     assert result["metadata"]["owner"] == {"model": "router", "reasoning": "router"}
 
 
-def test_generic_turn_route_changes_only_public_model_and_provider(monkeypatch):
+def test_generic_turn_route_selects_public_model_and_reasoning(monkeypatch):
     original = {
         "model": "gpt-6-sol",
         "provider": "openai-codex",
         "requested_provider": "openai-codex",
+        "current_reasoning_effort": "medium",
         "runtime": {"provider": "openai-codex", "requested_provider": "openai-codex", "api_mode": "responses"},
     }
     before = dict(original, runtime=dict(original["runtime"]))
-    monkeypatch.setattr(router, "_supported_efforts", lambda *_: pytest.fail("generic routing must not depend on effort support"))
+    monkeypatch.setattr(router, "_supported_efforts", lambda *_: pytest.fail("the host validates native choices"))
     monkeypatch.setattr(router, "_live_models", lambda: pytest.fail("generic routing must not import the private account catalog"))
 
     result = router.turn_route(
@@ -81,11 +82,53 @@ def test_generic_turn_route_changes_only_public_model_and_provider(monkeypatch):
     assert result["route"] == {
         **before,
         "model": "gpt-6-luna",
+        "reasoning_effort": "high",
         "requested_provider": "openai-codex",
         "runtime": {**before["runtime"], "requested_provider": "openai-codex"},
     }
     assert result["source"] == "jevgauge"
     assert result["reason"] == "economical"
+    assert result["status"] == "routed"
+
+
+def test_generic_turn_route_reports_bounded_default_after_abstention(monkeypatch):
+    monkeypatch.setattr(router, "_get_secret", lambda *_args: None)
+    original = {
+        "model": "gpt-6-sol",
+        "provider": "openai-codex",
+        "requested_provider": "openai-codex",
+        "current_reasoning_effort": "medium",
+        "runtime": {"provider": "openai-codex", "requested_provider": "openai-codex"},
+    }
+
+    result = router.turn_route(
+        ctx=Config(), route=original, user_message="task", source="desktop",
+        session_key="durable", is_first_turn=True, internal=False, tool_continuation=False,
+    )
+
+    assert result["route"] == original
+    assert result["status"] == "default"
+    assert result["reason"] == "missing_Jev_credential"
+
+
+def test_generic_turn_route_manual_mode_preserves_host_reasoning():
+    original = {
+        "model": "gpt-6-sol",
+        "provider": "openai-codex",
+        "requested_provider": "openai-codex",
+        "current_reasoning_effort": "medium",
+        "runtime": {"provider": "openai-codex", "requested_provider": "openai-codex"},
+    }
+
+    result = router.turn_route(
+        ctx=Config(effort_mode="manual"), route=original,
+        user_message="task", source="desktop", session_key="durable",
+        is_first_turn=True, internal=False, tool_continuation=False,
+    )
+
+    assert result["route"]["model"] == "gpt-6-luna"
+    assert result["route"]["preserve_reasoning"] is True
+    assert "reasoning_effort" not in result["route"]
 
 
 @pytest.mark.parametrize("overrides", [
