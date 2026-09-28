@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix='jevgauge-browser-') as home:
     spec = importlib.util.spec_from_file_location('browser_router', Path(__file__).parents[2] / 'jev-router/__init__.py')
     router = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(router)
-    router._get_secret = lambda: 'FAKE_SECRET_NOT_FOR_STORAGE'
+    router._get_secret = lambda *_args: 'FAKE_SECRET_NOT_FOR_STORAGE'
     router._live_models = lambda: ['gpt-4.1-nano', 'gpt-4.1-mini', 'gpt-4.1']
     router._supported_efforts = lambda *args: ['low']
     router._decide = lambda *args: {'answers': {'model_tier': {'choice': 'balanced', 'confidence': .9}, 'effort_tier': {'choice': 'low', 'confidence': .9}}}

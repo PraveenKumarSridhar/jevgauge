@@ -19,7 +19,7 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
       owner:{...owner},runtime,stored};
   }
 
-  function render(data, captured) {
+  function renderLegacy(data, captured) {
     if (!data || data.schema_version!==1 || data.session_id!==captured.runtime || data.stored_session_id!==captured.stored || data.selection_api!==1 || data.evidence!=='session_binding') {
       unavailable(); return;
     }
@@ -34,6 +34,28 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
     const suffix=manual ? ' (manual)' : data.status==='unrouted/default' ? ' (default)' : '';
     show(`Jev: ${model}${effort ? ' · '+effort : ''}${suffix}`,
       `Live session binding${manual ? ' with manual override' : ''}. Provider: ${routeLabel(data.provider) || 'unknown'}. Provider execution is not verified by this display.`);
+  }
+  function renderNative(data, captured) {
+    if (!data || data.schema_version!=='hermes.turn_route.binding.v1' || data.session_id!==captured.runtime ||
+        data.stored_session_id!==captured.stored || data.evidence!=='session_binding') {
+      unavailable(); return;
+    }
+    if (data.status==='pending') {show('Jev: choosing','Selecting this conversation’s model.'); return;}
+    if (data.status==='unrecorded') {show('Jev: unrecorded','This conversation predates durable route bindings.'); return;}
+    if (!['default','routed','user'].includes(data.status)) {unavailable(); return;}
+    if (data.status==='routed' && (!Array.isArray(data.middleware_plugins) || !data.middleware_plugins.includes('jev-router'))) {
+      unavailable(); return;
+    }
+    const model=routeLabel(data.model);
+    if (!model) {unavailable(); return;}
+    const manual=data.status==='user' || data.owner==='user';
+    const suffix=manual ? ' (manual)' : data.status==='default' ? ' (default)' : '';
+    show(`Jev: ${model}${suffix}`,
+      `Live session binding${manual ? ' with manual override' : ''}. Provider: ${routeLabel(data.requested_provider) || routeLabel(data.provider) || 'unknown'}. Provider execution is not verified by this display.`);
+  }
+  function render(data, captured) {
+    if (data?.schema_version==='hermes.turn_route.binding.v1') renderNative(data,captured);
+    else renderLegacy(data,captured);
   }
   function refresh() {
     if (disposed || initializing) return;
@@ -59,8 +81,13 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
       if (disposed || expired || requestGeneration!==generation || identity().key!==captured.key) return null;
       const matches=routes.filter(route => route.connectionId===captured.owner.connectionId && route.profile===captured.owner.profile);
       if (matches.length!==1 || !matches[0].targetProfile) throw new Error('unresolved route');
-      return host.requestProfile(matches[0],'session.runtime_selection',
-        {session_id:captured.runtime,stored_session_id:captured.stored},5000);
+      const params={session_id:captured.runtime,stored_session_id:captured.stored};
+      try {
+        return await host.requestProfile(matches[0],'session.turn_route.read',params,5000);
+      } catch {
+        if (disposed || expired || requestGeneration!==generation || identity().key!==captured.key) return null;
+        return host.requestProfile(matches[0],'session.runtime_selection',params,5000);
+      }
     });
     Promise.race([read,deadline])
       .then(data => {

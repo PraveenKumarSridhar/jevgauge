@@ -1,5 +1,7 @@
 import importlib.util
 from pathlib import Path
+import sys
+from types import ModuleType
 
 import pytest
 import yaml
@@ -10,6 +12,7 @@ spec = importlib.util.spec_from_file_location("jev_router_poc", PLUGIN)
 router = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(router)
 REAL_DECIDE = router._decide
+REAL_GET_SECRET = router._get_secret
 
 
 def test_manifest_declares_persistent_effort_mode():
@@ -38,7 +41,7 @@ def call(**overrides):
 
 @pytest.fixture(autouse=True)
 def setup(monkeypatch):
-    monkeypatch.setattr(router, "_get_secret", lambda: "test-key")
+    monkeypatch.setattr(router, "_get_secret", lambda *_args: "test-key")
     monkeypatch.setattr(router, "_supported_efforts", lambda provider, model: ("none", "low", "medium", "high"))
     monkeypatch.setattr(router, "_live_models", lambda: ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"])
     monkeypatch.setattr(router, "_decide", lambda *a: {
@@ -54,6 +57,114 @@ def test_model_and_effort_are_independent():
     assert result["model"] == "gpt-6-luna"
     assert result["reasoning_effort"] == "high"
     assert result["metadata"]["owner"] == {"model": "router", "reasoning": "router"}
+
+
+def test_generic_turn_route_changes_only_public_model_and_provider(monkeypatch):
+    original = {
+        "model": "gpt-6-sol",
+        "provider": "openai-codex",
+        "requested_provider": "openai-codex",
+        "runtime": {"provider": "openai-codex", "requested_provider": "openai-codex", "api_mode": "responses"},
+    }
+    before = dict(original, runtime=dict(original["runtime"]))
+    monkeypatch.setattr(router, "_supported_efforts", lambda *_: pytest.fail("generic routing must not depend on effort support"))
+    monkeypatch.setattr(router, "_live_models", lambda: pytest.fail("generic routing must not import the private account catalog"))
+
+    result = router.turn_route(
+        ctx=Config(), route=original, original_redacted_route=before,
+        user_message="Solve the complex task", source="desktop",
+        session_id="runtime", session_key="durable", is_first_turn=True,
+        internal=False, tool_continuation=False,
+    )
+
+    assert original == before
+    assert result["route"] == {
+        **before,
+        "model": "gpt-6-luna",
+        "requested_provider": "openai-codex",
+        "runtime": {**before["runtime"], "requested_provider": "openai-codex"},
+    }
+    assert result["source"] == "jevgauge"
+    assert result["reason"] == "economical"
+
+
+@pytest.mark.parametrize("overrides", [
+    {"source": "cli"},
+    {"internal": True},
+    {"tool_continuation": True},
+    {"is_first_turn": False},
+    {"ctx": Config(enabled=False)},
+])
+def test_generic_turn_route_ignores_ineligible_turns(overrides):
+    args = dict(
+        ctx=Config(),
+        route={"model": "gpt-6-sol", "provider": "openai-codex", "requested_provider": "openai-codex"},
+        user_message="task", source="desktop", session_key="durable",
+        is_first_turn=True, internal=False, tool_continuation=False,
+    )
+    args.update(overrides)
+    assert router.turn_route(**args) is None
+
+
+def test_registers_native_middleware_and_legacy_hooks():
+    class RegistrationContext(Config):
+        def __init__(self):
+            super().__init__()
+            self.middleware = []
+            self.hooks = []
+            self.commands = []
+
+        def register_middleware(self, name, callback):
+            self.middleware.append((name, callback))
+
+        def register_hook(self, name, callback):
+            self.hooks.append((name, callback))
+
+        def register_command(self, name, callback, **_kwargs):
+            self.commands.append((name, callback))
+
+    ctx = RegistrationContext()
+    router.register(ctx)
+    assert [name for name, _ in ctx.middleware] == ["turn_route"]
+    assert [name for name, _ in ctx.hooks] == ["select_session_runtime", "provider_attempt"]
+
+
+def test_native_only_host_does_not_register_unknown_legacy_hooks(monkeypatch):
+    parent = ModuleType("hermes_cli")
+    plugins = ModuleType("hermes_cli.plugins")
+    plugins.VALID_HOOKS = {"pre_llm_call"}
+    parent.plugins = plugins
+    monkeypatch.setitem(sys.modules, "hermes_cli", parent)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+
+    class NativeContext(Config):
+        def __init__(self):
+            super().__init__()
+            self.middleware = []
+            self.hooks = []
+
+        def register_middleware(self, name, callback):
+            self.middleware.append((name, callback))
+
+        def register_hook(self, name, callback):
+            self.hooks.append((name, callback))
+
+        def register_command(self, *_args, **_kwargs):
+            return None
+
+    ctx = NativeContext()
+    router.register(ctx)
+    assert [name for name, _ in ctx.middleware] == ["turn_route"]
+    assert ctx.hooks == []
+
+
+def test_native_secret_uses_public_plugin_context():
+    class SecretContext:
+        def get_secret(self, name):
+            assert name == "TYPESAFE_API_KEY"
+            return "context-secret"
+
+    assert REAL_GET_SECRET(SecretContext()) == "context-secret"
 
 
 def test_manual_model_and_reasoning_are_preserved():

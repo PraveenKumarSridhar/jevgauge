@@ -26,7 +26,13 @@ PLUGIN_FILES = ('__init__.py', 'plugin.yaml', 'telemetry.py', 'runtime.json')
 MANIFEST = '.jevgauge-install.json'
 DESKTOP_MANIFEST = '.jevgauge-desktop-install.json'
 REQUIRED_SYMBOLS = {
-    'hermes_cli/plugins.py': ('has_hook', 'invoke_hook', 'register_hook', 'register_command', 'get_config'),
+    'hermes_cli/plugins.py': ('has_hook', 'invoke_hook', 'register_hook', 'register_middleware',
+                              'register_command', 'get_config'),
+}
+NATIVE_REQUIRED_SYMBOLS = {
+    'hermes_cli/plugins.py': ('get_secret',),
+}
+LEGACY_REQUIRED_SYMBOLS = {
     'hermes_cli/auth.py': ('resolve_codex_runtime_credentials',),
     'hermes_cli/auth_codex.py': ('_codex_base_url', 'resolve_codex_runtime_credentials'),
     'hermes_cli/codex_models.py': ('_ranked_slugs',),
@@ -41,34 +47,89 @@ class InstallError(Exception):
     """A safe, user-facing error without configuration or credential contents."""
 
 
-def check_compatibility(repo: Path) -> None:
-    for relative, required in REQUIRED_SYMBOLS.items():
+def _assigned_constant(tree: ast.AST, name: str, expected) -> bool:
+    for node in getattr(tree, 'body', ()):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+        if (any(isinstance(target, ast.Name) and target.id == name for target in targets)
+                and isinstance(node.value, ast.Constant) and node.value.value == expected
+                and type(node.value.value) is type(expected)):
+            return True
+    return False
+
+
+def _declares_rpc(tree: ast.AST, name: str) -> bool:
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if (isinstance(decorator, ast.Call) and decorator.args
+                    and isinstance(decorator.args[0], ast.Constant)
+                    and decorator.args[0].value == name):
+                return True
+    return False
+
+
+def _parse_optional(repo: Path, relative: str) -> ast.AST | None:
+    try:
+        return ast.parse((repo / relative).read_text(encoding='utf-8'))
+    except (OSError, SyntaxError, UnicodeError):
+        return None
+
+
+def _routing_contract(repo: Path, plugins_tree: ast.AST) -> str | None:
+    middleware = _parse_optional(repo, 'hermes_cli/middleware.py')
+    resolver = _parse_optional(repo, 'hermes_cli/turn_routing.py')
+    read_api = _parse_optional(repo, 'tui_gateway/methods_turn_route.py')
+    middleware_symbols = ({node.name for node in ast.walk(middleware)
+                           if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                          if middleware is not None else set())
+    resolver_symbols = ({node.name for node in ast.walk(resolver)
+                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                        if resolver is not None else set())
+    native = (
+        middleware is not None
+        and _assigned_constant(middleware, 'TURN_ROUTE_MIDDLEWARE', 'turn_route')
+        and 'apply_turn_route_middleware' in middleware_symbols
+        and 'resolve_turn_route' in resolver_symbols
+        and read_api is not None
+        and _declares_rpc(read_api, 'session.turn_route.read')
+    )
+    if native:
+        return 'turn_route'
+    if _assigned_constant(plugins_tree, 'SESSION_RUNTIME_SELECTION_API', 1):
+        return 'select_session_runtime'
+    return None
+
+
+def _check_symbols(repo: Path, requirements: dict[str, tuple[str, ...]], parsed: dict) -> None:
+    for relative, required in requirements.items():
         try:
-            tree = ast.parse((repo / relative).read_text(encoding='utf-8'))
+            tree = parsed.get(relative) or ast.parse((repo / relative).read_text(encoding='utf-8'))
         except (OSError, SyntaxError, UnicodeError):
             raise InstallError(f'Cannot inspect required Hermes module {relative}. Supply --hermes-repo with the checkout path.') from None
-        if relative == 'hermes_cli/plugins.py':
-            supported = any(
-                isinstance(node, ast.Assign)
-                and any(isinstance(target, ast.Name) and target.id == 'SESSION_RUNTIME_SELECTION_API' for target in node.targets)
-                and isinstance(node.value, ast.Constant) and type(node.value.value) is int and node.value.value == 1
-                for node in tree.body
-            )
-            if not supported:
-                raise InstallError('Hermes lacks SESSION_RUNTIME_SELECTION_API = 1. Standalone installation requires this generic hook in an upstream Hermes release. See the documented integration patch for a development checkout; this installer never patches Hermes.')
-            attempt_api = any(
-                isinstance(node, ast.Assign)
-                and any(isinstance(target, ast.Name) and target.id == 'PROVIDER_ATTEMPT_API' for target in node.targets)
-                and isinstance(node.value, ast.Constant) and type(node.value.value) is int and node.value.value == 1
-                for node in tree.body
-            )
-            if not attempt_api:
-                raise InstallError('Hermes lacks PROVIDER_ATTEMPT_API = 1. Apply the documented dashboard integration to an isolated supported checkout before installation.')
+        parsed[relative] = tree
         symbols = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
         symbols.update(alias.asname or alias.name for node in tree.body if isinstance(node, ast.ImportFrom) for alias in node.names)
         missing = set(required) - symbols
         if missing:
             raise InstallError(f'Incompatible Hermes API in {relative}: missing {", ".join(sorted(missing))}.')
+
+
+def check_compatibility(repo: Path) -> str:
+    parsed = {}
+    _check_symbols(repo, REQUIRED_SYMBOLS, parsed)
+    contract = _routing_contract(repo, parsed['hermes_cli/plugins.py'])
+    if not contract:
+        raise InstallError(
+            'Hermes lacks the native turn_route plus session.turn_route.read contract and the '
+            'legacy SESSION_RUNTIME_SELECTION_API = 1 contract. Update Hermes to a compatible '
+            'release or use the documented isolated development integration; this installer never patches Hermes.')
+    _check_symbols(
+        repo,
+        NATIVE_REQUIRED_SYMBOLS if contract == 'turn_route' else LEGACY_REQUIRED_SYMBOLS,
+        parsed,
+    )
+    return contract
 
 
 def _plugin_files() -> dict[str, bytes]:
@@ -275,11 +336,12 @@ def _lock(home: Path):
 
 def operate(command: str, home: Path, repo: Path) -> None:
     _check_paths(home)
+    contract = None
     if command in ('doctor', 'install', 'enable'):
-        check_compatibility(repo)
+        contract = check_compatibility(repo)
     if command == 'doctor':
         _read_config(home)
-        print('Hermes API contract is compatible. This does not verify authentication, account models, or a live provider call.')
+        print(f'Hermes API contract is compatible ({contract}). This does not verify authentication, account models, or a live provider call.')
         return
     with _lock(home):
         _check_paths(home)

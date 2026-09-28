@@ -23,6 +23,9 @@ class CommandContext:
     def register_hook(self, *args):
         pass
 
+    def register_middleware(self, *args):
+        pass
+
 
 @pytest.fixture
 def command(monkeypatch):
@@ -31,11 +34,15 @@ def command(monkeypatch):
     host.SESSION_RUNTIME_SELECTION_API = 1
     host.PROVIDER_ATTEMPT_API = 1
     host.VALID_HOOKS = {'select_session_runtime', 'provider_attempt'}
+    middleware = ModuleType('hermes_cli.middleware')
+    middleware.VALID_MIDDLEWARE = {'turn_route'}
+    parent.middleware = middleware
     # Registration alone is not evidence that the host invokes a hook.
     host.has_hook = lambda name: True
     parent.plugins = host
     monkeypatch.setitem(sys.modules, 'hermes_cli', parent)
     monkeypatch.setitem(sys.modules, 'hermes_cli.plugins', host)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.middleware', middleware)
     monkeypatch.setattr(router, '_session_record', lambda: {
         'model': 'gpt-6-luna',
         'model_config': json.dumps({
@@ -54,6 +61,7 @@ def test_missing_host_hook_wins_over_a_saved_routed_decision(command):
     invoke, _, host = command
     del host.SESSION_RUNTIME_SELECTION_API
     host.VALID_HOOKS = set()
+    sys.modules['hermes_cli.middleware'].VALID_MIDDLEWARE = set()
     text = invoke('')
     assert 'Routing unavailable: host integration missing' in text
     assert 'saved binding withheld' in text
@@ -72,6 +80,7 @@ def test_missing_host_hook_wins_over_a_saved_routed_decision(command):
 ])
 def test_unsupported_or_incomplete_contract_never_reports_available(command, version, hooks):
     invoke, _, host = command
+    sys.modules['hermes_cli.middleware'].VALID_MIDDLEWARE = set()
     host.SESSION_RUNTIME_SELECTION_API = version
     host.VALID_HOOKS = hooks
     snapshot = json.loads(invoke('--json'))
@@ -85,7 +94,8 @@ def test_routing_capability_and_provider_telemetry_are_independent(command):
     host.VALID_HOOKS.remove('provider_attempt')
     runtime = json.loads(invoke('--json'))['runtime']
     assert runtime['routing']['status'] == 'available'
-    assert runtime['routing']['scope'] == 'launch_profile_only'
+    assert runtime['routing']['contract'] == 'turn_route'
+    assert runtime['routing']['scope'] == 'addressed_profile'
     assert runtime['telemetry']['status'] == 'unavailable'
     assert runtime['verification'] == 'capability_only'
     assert 'execution unverified' in invoke('')
@@ -134,6 +144,7 @@ def test_missing_saved_record_is_distinct_from_storage_failure(command, monkeypa
 def test_failed_host_inspection_remains_unknown(command, monkeypatch):
     invoke, _, _ = command
     monkeypatch.setitem(sys.modules, 'hermes_cli.plugins', None)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.middleware', None)
     snapshot = json.loads(invoke('--json'))
     assert snapshot['runtime']['routing']['status'] == 'unknown'
     assert snapshot['conversation']['state'] == 'scope_unverified'

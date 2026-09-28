@@ -8,12 +8,20 @@ from jevgauge import cli
 @pytest.fixture
 def installation(tmp_path, monkeypatch):
     repo = tmp_path / 'Hermes checkout'
-    for relative, names in cli.REQUIRED_SYMBOLS.items():
+    requirements = {**cli.REQUIRED_SYMBOLS, **cli.LEGACY_REQUIRED_SYMBOLS}
+    for relative, names in requirements.items():
         path = repo / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('\n'.join(f'def {name}(): pass' for name in names))
     plugins = repo / 'hermes_cli/plugins.py'
-    plugins.write_text(plugins.read_text() + '\nSESSION_RUNTIME_SELECTION_API = 1\nPROVIDER_ATTEMPT_API = 1\n')
+    plugins.write_text(plugins.read_text() + '\ndef get_secret(): pass\nPROVIDER_ATTEMPT_API = 1\n')
+    middleware = repo / 'hermes_cli/middleware.py'
+    middleware.write_text('TURN_ROUTE_MIDDLEWARE = "turn_route"\nVALID_MIDDLEWARE = {TURN_ROUTE_MIDDLEWARE}\ndef apply_turn_route_middleware(): pass\n')
+    resolver = repo / 'hermes_cli/turn_routing.py'
+    resolver.write_text('def resolve_turn_route(): pass\n')
+    read_api = repo / 'tui_gateway/methods_turn_route.py'
+    read_api.parent.mkdir(parents=True, exist_ok=True)
+    read_api.write_text('@method("session.turn_route.read")\ndef read(): pass\n')
     home = tmp_path / 'User home'
     source = tmp_path / 'source'
     source.mkdir()
@@ -54,11 +62,27 @@ def test_install_enable_disable_uninstall_preserves_other_settings(installation)
 
 def test_missing_hook_refuses_without_writing(installation, capsys):
     repo, home = installation
-    path = repo / 'hermes_cli/plugins.py'
-    path.write_text(path.read_text().replace('SESSION_RUNTIME_SELECTION_API = 1', '# SESSION_RUNTIME_SELECTION_API = 1'))
+    (repo / 'hermes_cli/middleware.py').write_text('VALID_MIDDLEWARE = set()\n')
+    (repo / 'hermes_cli/turn_routing.py').unlink()
+    (repo / 'tui_gateway/methods_turn_route.py').unlink()
     assert run(installation, 'install') == 1
     assert not home.exists()
-    assert 'upstream' in capsys.readouterr().err
+    assert 'turn_route' in capsys.readouterr().err
+
+
+def test_native_contract_does_not_require_legacy_private_catalog_helpers(installation):
+    repo, _ = installation
+    for relative in cli.LEGACY_REQUIRED_SYMBOLS:
+        (repo / relative).unlink()
+    assert run(installation, 'doctor') == 0
+
+
+def test_native_contract_requires_public_profile_secret_reader(installation):
+    repo, home = installation
+    plugins = repo / 'hermes_cli/plugins.py'
+    plugins.write_text(plugins.read_text().replace('def get_secret(): pass\n', ''))
+    assert run(installation, 'doctor') == 1
+    assert not home.exists()
 
 
 def test_matching_manual_desktop_plugin_is_adopted_without_replacement(installation):
@@ -116,8 +140,13 @@ def test_unmanaged_desktop_plugin_survives_uninstall(installation):
     assert (plugin / 'plugin.js').exists()
 
 
-def test_missing_dependency_refuses(installation):
+def test_legacy_contract_missing_dependency_refuses(installation):
     repo, home = installation
+    (repo / 'hermes_cli/middleware.py').unlink()
+    (repo / 'hermes_cli/turn_routing.py').unlink()
+    (repo / 'tui_gateway/methods_turn_route.py').unlink()
+    plugins = repo / 'hermes_cli/plugins.py'
+    plugins.write_text(plugins.read_text() + '\nSESSION_RUNTIME_SELECTION_API = 1\n')
     (repo / 'agent/reasoning_effort.py').write_text('')
     assert run(installation, 'doctor') == 1
     assert not home.exists()
@@ -420,10 +449,20 @@ def test_legacy_upgrade_preserves_unowned_new_filenames(installation):
     assert (plugin / 'telemetry.py').read_text() == '# user-owned unrelated file'
 
 
-def test_dashboard_install_refuses_host_without_physical_attempt_hook(installation, capsys):
+def test_missing_optional_physical_attempt_hook_does_not_block_routing_install(installation, capsys):
     repo, home = installation
     path = repo / 'hermes_cli/plugins.py'
     path.write_text(path.read_text().replace('PROVIDER_ATTEMPT_API = 1', '# PROVIDER_ATTEMPT_API = 1'))
-    assert run(installation, 'install') == 1
-    assert not home.exists()
-    assert 'PROVIDER_ATTEMPT_API' in capsys.readouterr().err
+    assert run(installation, 'install') == 0
+    assert (home / 'plugins/jev-router/__init__.py').exists()
+    assert 'PROVIDER_ATTEMPT_API' not in capsys.readouterr().err
+
+
+def test_legacy_patched_host_remains_compatible(installation):
+    repo, _ = installation
+    (repo / 'hermes_cli/middleware.py').unlink()
+    (repo / 'hermes_cli/turn_routing.py').unlink()
+    (repo / 'tui_gateway/methods_turn_route.py').unlink()
+    plugins = repo / 'hermes_cli/plugins.py'
+    plugins.write_text(plugins.read_text() + '\nSESSION_RUNTIME_SELECTION_API = 1\n')
+    assert run(installation, 'doctor') == 0

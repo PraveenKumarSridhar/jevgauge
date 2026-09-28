@@ -131,7 +131,8 @@ assert list(Path({str(installed_source.parent)!r}).glob('__pycache__/__init__.*.
         committed = run(['git', '-C', repo, 'show', f'{args.stock_ref}:hermes_cli/plugins.py'], env=environment, cwd=workspace).stdout
         (upstream / 'hermes_cli/plugins.py').write_text(committed, encoding='utf-8')
         result = run([python, '-m', 'jevgauge', 'install', '--hermes-repo', upstream], env=environment, cwd=workspace, expected=1)
-        assert 'upstream' in result.stderr and 'SESSION_RUNTIME_SELECTION_API' in result.stderr
+        assert 'turn_route' in result.stderr and 'SESSION_RUNTIME_SELECTION_API' in result.stderr
+        assert 'never patches Hermes' in result.stderr
         assert not (home / 'plugins/jev-router/__init__.py').exists()
         assert list((home / 'plugins/jev-router/__pycache__').glob('__init__.*.pyc'))
         print('PASS committed upstream API refuses unsupported installation')

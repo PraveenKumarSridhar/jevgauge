@@ -16,7 +16,7 @@ When cache or user files remain after uninstall, a small ownership record remain
 
 Existing plugin symlinks or unmanaged directories are refused. For development symlinks, keep the symlink and configure the plugin manually, or back it up and move it aside before managed installation. There is intentionally no force-overwrite flag.
 
-The native indicator is installed in `<home>/desktop-plugins/jev-router/plugin.js`. Enable **Jev routing** separately in Desktop Capabilities → Plugins. An exact manually installed copy is adopted without replacement; a different or edited copy is refused. A stock Hermes backend still lacks the early route hook and addressed read API, so the installer refuses it before writing either plugin.
+The native indicator is installed in `<home>/desktop-plugins/jev-router/plugin.js`. Enable **Jev routing** separately in Desktop Capabilities → Plugins. An exact manually installed copy is adopted without replacement; a different or edited copy is refused. The installer accepts either the native `turn_route` plus `session.turn_route.read` contract or the pinned legacy runtime-selection contract. It refuses unsupported hosts before writing either plugin.
 
 ## Clean wheel smoke
 
@@ -29,9 +29,9 @@ This creates an isolated environment and a temporary home with spaces in the pat
 
 ## Troubleshooting
 
-- **Missing API marker:** the checkout is stock or unsupported. Follow the explicit integration guide. Adding only the marker is not integration.
-- **No panel:** confirm both the GUI and backend came from the integrated checkout, then start a new eligible chat.
+- **Missing routing contract:** the checkout is unsupported. Use a Hermes release that provides the native route and read contract, or follow the isolated legacy integration guide. Adding only a marker is not integration.
+- **No indicator:** confirm the Desktop plugin is enabled, the backend contract passes `doctor`, and the GUI and backend use the same checkout. Then start a new eligible chat.
 - **Defaults retained:** check `/jev-status`. Typical causes: missing TypeSafe key, no account candidates, timeout, or confidence below threshold.
-- **Nothing routes:** check enabled list + plugin setting, launch profile, `openai-codex`, and whether this is already an existing conversation.
+- **Nothing routes:** check the enabled list, plugin setting, `openai-codex`, and whether this is already an existing conversation. Legacy integration is limited to the launch profile.
 - **Changed managed files:** back up/move the directory. Uninstall will not delete local modifications.
 - **Auth works in a terminal but not Desktop:** ensure the key is in the Hermes launch home's secret environment. Shell-only exports may not reach GUI launches.

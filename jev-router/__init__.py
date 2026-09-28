@@ -1,4 +1,4 @@
-"""Jev model and effort router for the generic select_session_runtime hook."""
+"""Jev model router for native turn-route middleware and the legacy session hook."""
 
 from __future__ import annotations
 
@@ -55,7 +55,11 @@ def _default(reason: str, *, model: str, provider: str, reasoning_config: Any,
     }}
 
 
-def _get_secret():
+def _get_secret(ctx=None):
+    getter = getattr(ctx, "get_secret", None)
+    if callable(getter):
+        return getter("TYPESAFE_API_KEY")
+    # Legacy development hosts predate PluginContext.get_secret.
     from agent.secret_scope import get_secret
     return get_secret("TYPESAFE_API_KEY")
 
@@ -195,7 +199,9 @@ def route(**kwargs):
                  "outcome": "routed" if meta.get("status") == "routed" else "abstained" if result else "disabled",
                  "eligible_models": [{"model": model, "capability": rank} for model, rank in sorted(capabilities.items())],
                  "eligibility_source": "account catalog intersected with configured capacity tiers" if capabilities else None,
-                 "manual_override": bool(kwargs.get("user_model") or kwargs.get("user_reasoning") or kwargs["ctx"].get_config("effort_mode", "auto") == "manual"),
+                 "manual_override": bool(kwargs.get("user_model") or kwargs.get("user_reasoning")
+                                         or (not kwargs.get("model_only")
+                                             and kwargs["ctx"].get_config("effort_mode", "auto") == "manual")),
                  "latency_ms": (time.monotonic() - started) * 1000}
         meta["telemetry_route_id"] = event["event_id"]
         _record(event)
@@ -205,12 +211,14 @@ def route(**kwargs):
 
 
 def _route(*, ctx, message: str, source: str, provider: str, model: str,
-          reasoning_config: Any, user_model: bool, user_reasoning: bool, **_kw) -> dict | None:
+          reasoning_config: Any, user_model: bool, user_reasoning: bool,
+          model_only: bool = False, **_kw) -> dict | None:
     if source != "desktop" or provider != "openai-codex" or not ctx.get_config("enabled", False):
         return None
     user_reasoning = user_reasoning or ctx.get_config("effort_mode", "auto") == "manual"
     kwargs = dict(ctx=ctx, message=message, provider=provider, model=model,
-                  reasoning_config=reasoning_config, user_model=user_model, user_reasoning=user_reasoning)
+                  reasoning_config=reasoning_config, user_model=user_model,
+                  user_reasoning=user_reasoning, model_only=model_only)
     def default(reason):
         return _default(reason, model=model, provider=provider, reasoning_config=reasoning_config,
                         user_model=user_model, user_reasoning=user_reasoning)
@@ -248,26 +256,39 @@ def _route(*, ctx, message: str, source: str, provider: str, model: str,
         return default("routing deadline exceeded")
     metadata = result["metadata"]
     if metadata["status"] == "routed":
-        logger.info("Jev proposed model=%s effort=%s", metadata["model"], metadata["reasoning_effort"])
+        if model_only:
+            logger.info("Jev proposed model=%s", metadata["model"])
+        else:
+            logger.info("Jev proposed model=%s effort=%s", metadata["model"], metadata["reasoning_effort"])
     return result
 
 
-def _select(*, ctx, message, provider, model, reasoning_config, user_model, user_reasoning):
+def _select(*, ctx, message, provider, model, reasoning_config, user_model, user_reasoning,
+            model_only=False):
     # A persistent manual mode leaves the profile's reasoning effort in charge for new chats.
     user_reasoning = user_reasoning or ctx.get_config("effort_mode", "auto") == "manual"
-    api_key = _get_secret()
+    api_key = _get_secret(ctx)
     if not api_key:
         return _default("missing Jev credential", model=model, provider=provider,
                         reasoning_config=reasoning_config,
                         user_model=user_model, user_reasoning=user_reasoning)
     eligible = {}
     try:
-        live = set(_live_models())
         tiers = ctx.get_config("tier_models", DEFAULT_TIERS)
         if not isinstance(tiers, dict):
             raise _Rejected("invalid tier mapping")
-        eligible = {tier: [candidate for candidate in options if candidate in live]
-                    for tier, options in tiers.items() if tier in DEFAULT_TIERS and isinstance(options, list)}
+        live = None if model_only else set(_live_models())
+        eligible = {
+            tier: [
+                candidate.strip() for candidate in options
+                if isinstance(candidate, str)
+                and candidate.strip()
+                and len(candidate.strip()) <= 128
+                and (live is None or candidate.strip() in live)
+            ][:16]
+            for tier, options in tiers.items()
+            if tier in DEFAULT_TIERS and isinstance(options, list)
+        }
         if not any(eligible.values()):
             raise _Rejected("no eligible account models")
         jev_model = str(ctx.get_config("jev_model", "jev-latest"))
@@ -282,10 +303,12 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
         confidences = (model_answer["confidence"], effort_answer["confidence"])
         if not all(type(value) in (int, float) and math.isfinite(value) and 0.55 <= value <= 1 for value in confidences):
             raise _Rejected("low Jev confidence")
-        chosen_effort = (_effective_effort(reasoning_config) if user_reasoning else EFFORTS[effort_tier])
+        chosen_effort = None if model_only else (
+            _effective_effort(reasoning_config) if user_reasoning else EFFORTS[effort_tier])
         candidates = [model] if user_model else eligible[model_tier]
-        chosen = next((candidate for candidate in candidates
-                       if chosen_effort in _supported_efforts(provider, candidate)), None)
+        chosen = (candidates[0] if candidates else None) if model_only else next(
+            (candidate for candidate in candidates
+             if chosen_effort in _supported_efforts(provider, candidate)), None)
         if not chosen:
             raise _Rejected("no supported model and effort pair")
         metadata = {
@@ -294,11 +317,11 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
             "model": chosen, "provider": provider, "reasoning_effort": chosen_effort,
             "candidate_models": eligible, "model_tier": model_tier, "effort_tier": effort_tier, "owner": {
                 "model": "user" if user_model else "router",
-                "reasoning": "user" if user_reasoning else "router"},
+                "reasoning": "default" if model_only else ("user" if user_reasoning else "router")},
         }
         return {"model": None if user_model else chosen, "provider": provider,
                 "reasoning_effort": None if user_reasoning else chosen_effort,
-                "preserve_reasoning": bool(user_reasoning), "metadata": metadata}
+                "preserve_reasoning": bool(user_reasoning or model_only), "metadata": metadata}
     except Exception as exc:
         logger.warning("Jev routing fell back: %s", type(exc).__name__)
         result = _default(str(exc) if isinstance(exc, _Rejected) else type(exc).__name__,
@@ -308,9 +331,60 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
         return result
 
 
+def turn_route(*, ctx, route: dict, user_message: str, source: str,
+               is_first_turn: bool, internal: bool = False,
+               tool_continuation: bool = False, **kwargs) -> dict | None:
+    """Adapt Jev to Hermes' credential-free, pre-agent ``turn_route`` contract."""
+    if (source != "desktop" or internal or tool_continuation or not is_first_turn
+            or not isinstance(route, dict)):
+        return None
+    model = route.get("model")
+    provider = route.get("requested_provider") or route.get("provider")
+    if not isinstance(model, str) or not model.strip() or provider != "openai-codex":
+        return None
+    result = globals()["route"](
+        ctx=ctx,
+        message=user_message if isinstance(user_message, str) else "",
+        source=source,
+        provider=provider,
+        model=model,
+        reasoning_config=None,
+        user_model=False,
+        user_reasoning=False,
+        model_only=True,
+        session_key=kwargs.get("session_key"),
+    )
+    metadata = (result or {}).get("metadata", {})
+    selected = metadata.get("model")
+    if metadata.get("status") != "routed" or not isinstance(selected, str) or not selected:
+        return None
+    public_route = dict(route)
+    public_route["model"] = selected
+    public_route["requested_provider"] = provider
+    if isinstance(route.get("runtime"), dict):
+        public_route["runtime"] = {**route["runtime"], "requested_provider": provider}
+    return {
+        "route": public_route,
+        "source": "jevgauge",
+        "reason": str(metadata.get("model_tier") or "selected")[:64],
+    }
+
+
 def register(ctx) -> None:
-    ctx.register_hook("select_session_runtime", lambda **kwargs: route(ctx=ctx, **kwargs))
-    ctx.register_hook("provider_attempt", provider_attempt)
+    register_middleware = getattr(ctx, "register_middleware", None)
+    if callable(register_middleware):
+        register_middleware("turn_route", lambda **kwargs: turn_route(ctx=ctx, **kwargs))
+    # Keep legacy integrations available without registering unknown hooks on a
+    # native-only host.
+    try:
+        from hermes_cli.plugins import VALID_HOOKS
+        valid_hooks = set(VALID_HOOKS)
+    except (ImportError, AttributeError, TypeError):
+        valid_hooks = {"select_session_runtime", "provider_attempt"}
+    if "select_session_runtime" in valid_hooks:
+        ctx.register_hook("select_session_runtime", lambda **kwargs: route(ctx=ctx, **kwargs))
+    if "provider_attempt" in valid_hooks:
+        ctx.register_hook("provider_attempt", provider_attempt)
     ctx.register_command("jev-dashboard", dashboard, description="Open the local JevGauge dashboard")
     ctx.register_command("jev-status", lambda args="": status(args, ctx=ctx),
                          description="Show Jev host capability and diagnostic scope")
@@ -395,6 +469,16 @@ def _contract_status(host, marker: str, hook: str) -> dict:
             "api_version": version if type(version) is int else None}
 
 
+def _turn_route_status(host) -> dict:
+    kinds = getattr(host, "VALID_MIDDLEWARE", ())
+    declared = isinstance(kinds, (set, frozenset, list, tuple)) and "turn_route" in kinds
+    if declared:
+        return {"status": "available", "reason": "host contract declared",
+                "api_version": 1, "contract": "turn_route", "scope": "addressed_profile"}
+    return {"status": "unavailable", "reason": "host integration missing",
+            "api_version": None, "contract": None, "scope": "unknown"}
+
+
 def runtime_health(ctx=None) -> dict:
     """Inspect this process, never confuse a registered callback with host support.
 
@@ -406,13 +490,28 @@ def runtime_health(ctx=None) -> dict:
 
     unknown = {"status": "unknown", "reason": "host inspection failed", "api_version": None}
     routing, telemetry = dict(unknown), dict(unknown)
+    native = None
     try:
-        host = importlib.import_module("hermes_cli.plugins")
-        routing = _contract_status(host, "SESSION_RUNTIME_SELECTION_API", "select_session_runtime")
-        telemetry = _contract_status(host, "PROVIDER_ATTEMPT_API", "provider_attempt")
+        native = _turn_route_status(importlib.import_module("hermes_cli.middleware"))
     except Exception:
         pass
-    routing["scope"] = "launch_profile_only"
+    try:
+        host = importlib.import_module("hermes_cli.plugins")
+        legacy = _contract_status(host, "SESSION_RUNTIME_SELECTION_API", "select_session_runtime")
+        if legacy["status"] == "available":
+            legacy.update(contract="select_session_runtime", scope="launch_profile_only")
+        if native and native["status"] == "available":
+            routing = native
+        elif legacy["status"] == "available":
+            routing = legacy
+        elif native is not None:
+            routing = native
+        else:
+            routing = legacy
+        telemetry = _contract_status(host, "PROVIDER_ATTEMPT_API", "provider_attempt")
+    except Exception:
+        if native is not None:
+            routing = native
     return {"routing": routing, "telemetry": telemetry, "enabled": None,
             "config_status": "scope_unverified", "verification": "capability_only"}
 
@@ -499,7 +598,9 @@ def status(_args: str = "", *, ctx=None) -> str:
     runtime, conversation = snapshot["runtime"], snapshot["conversation"]
     routing = runtime["routing"]
     if routing["status"] == "available":
-        lines = ["Routing host contract available (launch profile only; execution unverified)."]
+        scope = ("addressed profile" if routing.get("scope") == "addressed_profile"
+                 else "launch profile only")
+        lines = [f"Routing host contract available ({scope}; execution unverified)."]
     elif routing["status"] == "unavailable":
         lines = [f"Routing unavailable: {routing['reason']}."]
     else:

@@ -21,16 +21,19 @@ function setup() {
   return {state,calls,updates,controller,routes,host};
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
-const response = (overrides={}) => ({schema_version:1, session_id:'runtime', stored_session_id:'durable',
+const response = (overrides={}) => ({schema_version:'hermes.turn_route.binding.v1', session_id:'runtime', stored_session_id:'durable',
+  evidence:'session_binding', status:'routed', model:'gpt-6-luna', provider:'openai-codex',
+  requested_provider:'openai-codex', owner:'middleware', middleware_plugins:['jev-router'], ...overrides});
+const legacyResponse = (overrides={}) => ({schema_version:1, session_id:'runtime', stored_session_id:'durable',
   selection_api:1, telemetry_api:1, evidence:'session_binding', scope_supported:true, status:'routed', model:'gpt-6-luna',
   provider:'openai-codex', reasoning_effort:'low', owner:{model:'router',reasoning:'router'}, ...overrides});
 
 test('uses exact connection-qualified route and displays selected pair', async () => {
   const t=setup(); await flush(); assert.equal(t.calls.length,1);
-  assert.equal(t.calls[0].method,'session.runtime_selection');
+  assert.equal(t.calls[0].method,'session.turn_route.read');
   assert.deepEqual(t.calls[0].params,{session_id:'runtime',stored_session_id:'durable'});
   assert.equal(t.calls[0].route,t.routes[0]); t.calls[0].resolve(response()); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna · low'); t.controller.dispose();
+  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna'); t.controller.dispose();
 });
 test('focus change clears immediately and rejects late response even with identical IDs', async () => {
   const t=setup(); await flush(); t.calls[0].resolve(response()); await flush();
@@ -40,7 +43,7 @@ test('focus change clears immediately and rejects late response even with identi
   assert.equal(t.calls.at(-1).route,t.routes[2]); old.resolve(response({model:'foreign'})); await flush();
   assert.equal(t.updates.at(-1).label,'Jev: checking');
   t.calls.at(-1).resolve(response({model:'remote-model'})); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: remote-model · low'); t.controller.dispose();
+  assert.equal(t.updates.at(-1).label,'Jev: remote-model'); t.controller.dispose();
 });
 test('unknown ownership performs no request and removes previous route', async () => {
   const t=setup(); await flush(); t.calls[0].resolve(response()); await flush();
@@ -48,16 +51,23 @@ test('unknown ownership performs no request and removes previous route', async (
   const count=t.calls.length; t.controller.refresh(); await flush(); assert.equal(t.calls.length,count); t.controller.dispose();
 });
 test('rejects wrong durable identity and unsupported schema', async () => {
-  for (const invalid of [{stored_session_id:'wrong'},{schema_version:2}]) {
+  for (const invalid of [{stored_session_id:'wrong'},{schema_version:'unknown'}]) {
     const t=setup(); await flush(); t.calls[0].resolve(response(invalid)); await flush();
     assert.equal(t.updates.at(-1).label,'Jev: unavailable'); t.controller.dispose();
   }
 });
-test('missing RPC and unsupported sibling profile are visible, errors never echoed', async () => {
+test('falls back to the legacy read RPC and never echoes errors', async () => {
   const t=setup(); await flush(); t.calls[0].reject(new Error('PRIVATE path token')); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: unavailable'); assert.ok(!JSON.stringify(t.updates).includes('PRIVATE'));
-  t.controller.refresh(); await flush(); t.calls.at(-1).resolve(response({scope_supported:false})); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: unsupported profile'); t.controller.dispose();
+  assert.equal(t.calls[1].method,'session.runtime_selection');
+  t.calls[1].resolve(legacyResponse()); await flush();
+  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna · low');
+  assert.ok(!JSON.stringify(t.updates).includes('PRIVATE')); t.controller.dispose();
+});
+test('both missing RPCs are visible without leaking errors', async () => {
+  const t=setup(); await flush(); t.calls[0].reject(new Error('PRIVATE first')); await flush();
+  t.calls[1].reject(new Error('PRIVATE second')); await flush();
+  assert.equal(t.updates.at(-1).label,'Jev: unavailable');
+  assert.ok(!JSON.stringify(t.updates).includes('PRIVATE')); t.controller.dispose();
 });
 test('dispose removes subscriptions and ignores pending results', async () => {
   const t=setup(); await flush(); t.controller.dispose(); const count=t.updates.length;
@@ -99,11 +109,18 @@ test('descriptor timeout is visible and late lookup cannot issue an RPC', async 
 
 test('an event during an older read queues exactly one follow-up', async () => {
   const t=setup(); await flush(); t.controller.refresh(); t.controller.refresh();
-  t.calls[0].resolve(response({status:'selecting'})); await flush();
+  t.calls[0].resolve(response({status:'pending'})); await flush();
   assert.equal(t.calls.length,2); assert.equal(t.updates.at(-1).label,'Jev: choosing');
   t.calls[1].resolve(response()); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna · low');
+  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna');
   assert.equal(t.calls.length,2); t.controller.dispose();
+});
+
+test('native user ownership is shown as manual and unrelated middleware is not claimed as Jev', async () => {
+  const t=setup(); await flush(); t.calls[0].resolve(response({status:'user',owner:'user'})); await flush();
+  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna (manual)');
+  t.controller.refresh(); await flush(); t.calls.at(-1).resolve(response({middleware_plugins:['other-router']})); await flush();
+  assert.equal(t.updates.at(-1).label,'Jev: unavailable'); t.controller.dispose();
 });
 
 test('a corrupt routed model cannot be presented as a healthy default', async () => {

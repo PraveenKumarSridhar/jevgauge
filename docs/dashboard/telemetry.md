@@ -8,7 +8,7 @@ Only allowed evidence fields are stored. The host observer sends no prompt text,
 
 ## Integration scope
 
-`integration/hermes-runtime-selection.patch` is an explicit development integration at the commit in `integration/base.json`. It adds `PROVIDER_ATTEMPT_API=1` and a generic `provider_attempt` observer hook, alongside the existing proposed runtime-selection API. This is not an upstream release API. The installer checks both markers and never patches Hermes.
+`integration/hermes-runtime-selection.patch` is an explicit legacy development integration at the commit in `integration/base.json`. It adds `PROVIDER_ATTEMPT_API=1` and a generic `provider_attempt` observer hook alongside the legacy runtime-selection API. This is not an upstream release API. The installer never patches Hermes. The attempt hook is optional for installation: routing can work through the native contract while physical request evidence remains unavailable.
 
 Existing logical `pre_api_request` and `post_api_request` hooks cannot distinguish internal physical stream retries, and their normalized token summaries do not preserve missing breakdown evidence. The added hook wraps each physical OpenAI Codex Responses `create` call, including connect retries, stream retries, terminal failures, HTTP rejections and fallback continuations. Hermes' request clients set SDK retries to zero; the visible host retry paths create distinct attempt IDs. Start and terminal events share an attempt ID but have distinct event IDs. Partial streams without a terminal frame remain failed with unavailable usage. HTTP rejection usage is captured only if the error body explicitly contains the supported usage fields.
 

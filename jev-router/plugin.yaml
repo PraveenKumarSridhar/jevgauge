@@ -6,6 +6,8 @@ python_dependencies:
 provides_hooks:
   - select_session_runtime
   - provider_attempt
+provides_middleware:
+  - turn_route
 config_schema:
   enabled:
     type: bool
