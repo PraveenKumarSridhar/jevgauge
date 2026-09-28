@@ -3,6 +3,7 @@ import json
 import socket
 import sqlite3
 import threading
+import time
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -139,7 +140,13 @@ def test_only_one_history_aggregation_runs_and_other_endpoints_remain_available(
         finally:
             release.set()
         assert first.result(timeout=5)==200
-    assert status('/api/dashboard')==200
+    # The response can reach the client just before the handler releases its lock.
+    for _ in range(100):
+        final=status('/api/dashboard')
+        if final==200: break
+        assert final==503
+        time.sleep(.01)
+    assert final==200
 
 
 def test_legacy_owned_plugin_requires_upgrade_before_dashboard_enable(tmp_path):
