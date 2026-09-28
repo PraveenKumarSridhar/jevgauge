@@ -45,6 +45,8 @@ jobs:
         run: |
           git apply --check ../jevgauge/integration/hermes-runtime-selection.patch
           git apply ../jevgauge/integration/hermes-runtime-selection.patch
+          git apply -C1 --check ../jevgauge/integration/hermes-runtime-drift.patch
+          git apply -C1 ../jevgauge/integration/hermes-runtime-drift.patch
       - name: Hermes canonical lifecycle tests
         working-directory: hermes
         run: >-
