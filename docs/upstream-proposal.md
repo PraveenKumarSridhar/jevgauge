@@ -29,10 +29,10 @@ The current local hook disappears when Hermes replaces or resets its checkout. A
 |---|---|---|
 | First selection | Invoke once for the first substantive message, before agent construction, under the session's ownership/locking rules | `select_session_runtime`; launch-profile Desktop sessions only |
 | Capability discovery | Supply eligible provider/model/effort combinations in the owning profile, without giving the policy plugin provider credentials | Jev still imports private auth, account-catalog and effort helpers |
-| Effective binding | Validate the directive, preserve manual fields, persist the effective pair before the first call, restore on resume | Implemented locally; host must also own reserved metadata and ownership fields |
+| Effective binding | Validate the directive, preserve manual fields, persist the effective pair before the first call, restore on resume | Implemented locally, with reserved status and ownership fields synthesized by the host; an upstream contract is still required |
 | Read contract | Return the addressed session's binding and capability status without activating a session or constructing an agent | `session.runtime_selection` requires runtime and durable IDs; custom read patch |
 | Attempt evidence | Identify actual provider/model/effort, attempt lifecycle and fallback outcome separately from proposed binding | Custom `provider_attempt` hook and `PROVIDER_ATTEMPT_API = 1` instrument physical `openai-codex` Responses calls; other providers and equivalence with stock observers are unproven |
-| Execution bounds | Bound callback time and resource use; reject late results and stale progress after completion/cancellation | Jev bounds its selector, but both generic hooks currently dispatch synchronously without host timeout coverage |
+| Execution bounds | Bound callback time and resource use; reject late results and stale progress after completion/cancellation | Jev bounds its selector and the local host preview ignores late progress, but generic hook dispatch remains synchronous without a host deadline |
 | Compatibility | Document schema/version evolution, supported scope and migration behavior | Local markers only; no upstream compatibility commitment |
 
 The UI already uses the native Desktop SDK's title-bar contribution and popover. The proposed host change should not include the obsolete core Desktop route panel. Native UI can survive app replacement while the backend still lacks routing support; those are separate acceptance conditions.
@@ -45,7 +45,7 @@ The existing selector receives first-message text, session key, source, current 
 
 The public form additionally needs host-resolved capability data and explicit owning-profile identity. Keep plugin annotations in a bounded, namespaced field. The host must synthesize effective model/provider/effort, per-field ownership, lifecycle status, fallback eligibility and original runtime. Plugin annotations must not control those fields. A policy request to preserve effort, such as Jev's manual-effort mode, needs a validated directive rather than forged ownership. Progress reports must carry an invocation generation and become inert when selection finishes or times out.
 
-The current preview validates manual field writes but accepts plugin ownership/status metadata. An arbitrary selector can mislabel a host-inferred manual effort as router-owned, causing a later model switch or resume to lose its preservation signal. Jev currently returns consistent ownership; this is a generic API correctness gap, not a demonstrated Jev incident or privilege escalation. Adding a hook to a timeout allowlist alone would be insufficient because its abandoned worker could still call the current mutating progress callback.
+The preview initially accepted plugin ownership/status metadata. A regression demonstrated that arbitrary selector output could claim a routed or manually owned field without a corresponding host action. The repo-owned integration now strips reserved fields, synthesizes effective ownership and status, and ignores progress after selection ends. This is local patch behavior, not an upstream API guarantee. A host timeout still needs to stop or isolate abandoned callback work, not merely ignore its late report.
 
 `SESSION_RUNTIME_SELECTION_API = 1` and `PROVIDER_ATTEMPT_API = 1` currently identify local capabilities. The read schema independently distinguishes session binding from verified provider execution. Unknown/missing versions must yield explicit unavailable status, not stale saved state presented as live routing.
 
@@ -65,7 +65,7 @@ Current dispatch calls every registered selector before the host chooses the fir
 
 1. Agree on a typed host-owned binding, plugin annotation schema, capability input and multiple-selector precedence.
 2. Implement host-enforced deadlines, resource bounds and generation-gated progress/results. Test timeout followed by late callback and a concurrent manual action.
-3. Close metadata ownership and validation gaps. Test adversarial selector output and subsequent live/deferred model switches.
+3. Review the local reserved-field fix as part of a typed public schema. Extend adversarial tests through subsequent live/deferred model switches and persistence.
 4. Choose documented attempt evidence, either the proposed observer or proven stock observer coverage. Test streaming, retries, fallback, failure and resume before removing the custom dependency.
 5. Keep the read contract and native UI aligned, including identity collisions across connections/profiles and unsupported sibling-profile behavior.
 6. Replace Jev's private credential/catalog/effort imports with the public capability input. Upstream hook acceptance alone does not finish this migration.
@@ -75,6 +75,6 @@ No automatic patcher or second updater is part of this proposal. Until a support
 
 ## Evidence and limits
 
-The local lifecycle tests cover first-prompt ordering, concurrent/one-time selection, durable restore, manual effort through model changes, invalid selection and provisional rejection. The read and slash-status boundary tests cover addressed reads and refusal to infer conversation/profile state from ambient command context. Native controller tests cover stale responses and bounded reads.
+The local lifecycle tests cover first-prompt ordering, concurrent/one-time selection, durable restore, manual effort through model changes, invalid selection, provisional rejection, forged metadata and late progress. The read and slash-status boundary tests cover addressed reads and refusal to infer conversation/profile state from ambient command context. Native controller tests cover stale responses and bounded reads.
 
 On this Mac, an owned Jev installation and native UI survived an actual Desktop source rebuild/app replacement. Fresh and cold-resumed calls independently recorded `openai-codex` / `gpt-6-luna` / `low`. This does not establish arbitrary-plugin safety, all-profile support, other OS live-provider behavior, or compatibility with an unpatched future release. See [verification](verification.md) and [update compatibility](update-compatibility.md).

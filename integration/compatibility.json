@@ -18,6 +18,7 @@
   ],
   "fixtures": [
     {"source": "integration/tests/test_jev_status_scope.py", "destination": "tests/tui_gateway/test_jev_status_scope.py"},
+    {"source": "integration/tests/test_runtime_route_authority.py", "destination": "tests/tui_gateway/test_runtime_route_authority.py"},
     {"source": "jev-router/__init__.py", "destination": "tests/tui_gateway/jev_router_scope_source.py"}
   ],
   "tests": [
@@ -32,6 +33,7 @@
     "tests/tui_gateway/test_make_agent_provider.py",
     "tests/tui_gateway/test_runtime_selection_read.py",
     "tests/tui_gateway/test_jev_status_scope.py",
+    "tests/tui_gateway/test_runtime_route_authority.py",
     "tests/tui_gateway/contracts/test_generated.py"
   ],
   "command_timeout_seconds": 180,

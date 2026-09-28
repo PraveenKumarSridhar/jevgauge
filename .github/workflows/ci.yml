@@ -47,6 +47,7 @@ jobs:
           git apply ../jevgauge/integration/hermes-runtime-selection.patch
           git apply -C1 --check ../jevgauge/integration/hermes-runtime-drift.patch
           git apply -C1 ../jevgauge/integration/hermes-runtime-drift.patch
+          cp ../jevgauge/integration/tests/test_runtime_route_authority.py tests/tui_gateway/test_runtime_route_authority.py
       - name: Hermes canonical lifecycle tests
         working-directory: hermes
         run: >-
@@ -60,6 +61,7 @@ jobs:
           tests/tui_gateway/test_reasoning_session_scope.py
           tests/tui_gateway/test_deferred_model_switch_confirm.py
           tests/tui_gateway/test_make_agent_provider.py
+          tests/tui_gateway/test_runtime_route_authority.py
           tests/tui_gateway/contracts/test_generated.py
       - name: Build and smoke the installed wheel
         working-directory: jevgauge
