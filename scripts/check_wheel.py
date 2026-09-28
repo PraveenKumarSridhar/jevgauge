@@ -6,7 +6,7 @@ wheels = list(Path('dist').glob('*.whl'))
 assert len(wheels) == 1, 'Expected exactly one built wheel'
 with zipfile.ZipFile(wheels[0]) as wheel:
     names = set(wheel.namelist())
-    expected = {'jev_router/__init__.py', 'jev_router/plugin.yaml',
+    expected = {'jev_router/__init__.py', 'jev_router/plugin.yaml', 'jev_router/desktop/plugin.js',
                 'jevgauge/__init__.py', 'jevgauge/__main__.py', 'jevgauge/cli.py',
                 'jevgauge/dashboard.py', 'jevgauge/dashboard_config.py',
                 'jevgauge/telemetry.py', 'jevgauge/analytics.py', 'jevgauge/pricing.json',

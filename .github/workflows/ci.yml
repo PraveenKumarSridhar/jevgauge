@@ -2,6 +2,7 @@ name: Tests
 on:
   push:
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -97,3 +98,73 @@ jobs:
         env:
           PLAYWRIGHT_CHANNEL: chromium
           JEVGAUGE_PYTHON: python
+
+  compatibility-config:
+    name: Read compatibility configuration
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.config.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: config
+        run: |
+          python - <<'PYCONFIG'
+          import os, subprocess
+          matrix = subprocess.check_output(['python', 'scripts/check_hermes_update.py', '--matrix'], text=True).strip()
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + matrix + '\n')
+          PYCONFIG
+
+  native-routing:
+    name: Native routing / ${{ matrix.name }}
+    needs: compatibility-config
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.compatibility-config.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: jevgauge
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ matrix.ref }}
+          path: hermes
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Native plugin consistency and identity regressions
+        working-directory: jevgauge
+        run: |
+          python scripts/build_desktop.py --check
+          node --test tests/desktop/*.test.mjs
+      - name: Prepare independent CI test dependencies
+        id: environment
+        working-directory: hermes
+        run: |
+          source ./activate --
+          printf 'python=%s\n' "$__HERMES_TEST_PYTHON" >> "$GITHUB_OUTPUT"
+      - name: Verify candidate using shared compatibility configuration
+        working-directory: jevgauge
+        env:
+          CANDIDATE_TEST_PYTHON: ${{ steps.environment.outputs.python }}
+        run: >-
+          python scripts/check_hermes_update.py
+          --hermes-repo ../hermes
+          --ref HEAD
+          --test-python "$CANDIDATE_TEST_PYTHON"
+          --output-dir ../compatibility-evidence
+      - name: Report candidate evidence
+        if: always()
+        run: |
+          python - <<'PYREPORT'
+          from pathlib import Path
+          for receipt in Path('compatibility-evidence').glob('*/receipt.json'):
+              print(receipt.read_text())
+              print(receipt.with_name('check.log').read_text())
+          PYREPORT

@@ -16,6 +16,7 @@ def test_manifest_declares_persistent_effort_mode():
     manifest = yaml.safe_load((PLUGIN.parent / "plugin.yaml").read_text())
     assert manifest["config_schema"]["effort_mode"]["type"] == "str"
     assert manifest["config_schema"]["effort_mode"]["default"] == "auto"
+    assert manifest["python_dependencies"] == ["httpx>=0.28.1,<1"]
 
 
 class Config:
@@ -86,7 +87,7 @@ def test_failures_preserve_defaults(monkeypatch, failure):
     assert result["metadata"]["status"] == "unrouted/default"
 
 
-def test_status_reports_saved_binding(monkeypatch):
+def test_saved_status_parser_preserves_binding(monkeypatch):
 
     class DB:
         def __init__(self, read_only):
@@ -103,9 +104,10 @@ def test_status_reports_saved_binding(monkeypatch):
             pass
 
     monkeypatch.setattr(router, "_session_record", lambda: DB(True).get_session("route-1"))
-    result = router.status()
-    assert "gpt-6-luna (router)" in result
-    assert "low (router)" in result
+    result = router._saved_status()['route']
+    assert result['model'] == 'gpt-6-luna'
+    assert result['reasoning_effort'] == 'low'
+    assert result['owner'] == {'model': 'router', 'reasoning': 'router'}
 
 
 def test_timeout_and_other_provider_leave_defaults(monkeypatch):
@@ -267,7 +269,8 @@ def test_disabled_reasoning_status_is_not_profile_default(monkeypatch):
         'model': 'gpt-6-luna', 'model_config': {
             'reasoning_config': {'enabled': False},
             'session_route': {'owner': {'reasoning': 'user'}}}})
-    assert 'Effort: none (user)' in router.status()
+    assert router._saved_status()['route']['reasoning_effort'] == 'none'
+    assert router._saved_status()['route']['owner']['reasoning'] == 'user'
 
 
 @pytest.mark.parametrize('returned_model', [

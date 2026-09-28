@@ -141,14 +141,19 @@ def _record(event):
             return False
         try:
             if _STORAGE_RECORD is None:
-                try:
-                    from jevgauge.telemetry import record_event
-                except ImportError:
+                sibling = Path(__file__).with_name("telemetry.py")
+                owned = Path(__file__).with_name(".jevgauge-install.json")
+                if sibling.exists() or sibling.is_symlink() or owned.exists():
+                    # Installed bytes are authoritative. Never silently select an
+                    # older/editable package if this installation is damaged.
                     import importlib.util
-                    spec = importlib.util.spec_from_file_location("_jevgauge_storage", Path(__file__).with_name("telemetry.py"))
+                    spec = importlib.util.spec_from_file_location("_jevgauge_storage", sibling)
                     module = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(module)
                     record_event = module.record_event
+                else:
+                    # Source development layout keeps telemetry in src/jevgauge.
+                    from jevgauge.telemetry import record_event
                 _STORAGE_RECORD = record_event
         finally:
             _STORAGE_LOAD_LOCK.release()
@@ -306,7 +311,8 @@ def register(ctx) -> None:
     ctx.register_hook("select_session_runtime", lambda **kwargs: route(ctx=ctx, **kwargs))
     ctx.register_hook("provider_attempt", provider_attempt)
     ctx.register_command("jev-dashboard", dashboard, description="Open the local JevGauge dashboard")
-    ctx.register_command("jev-status", status, description="Show this chat's Jev routing binding")
+    ctx.register_command("jev-status", lambda args="": status(args, ctx=ctx),
+                         description="Show Jev host capability and diagnostic scope")
 
 
 def dashboard(_args: str = "") -> str:
@@ -376,19 +382,141 @@ def _session_record():
     return row
 
 
-def status(_args: str = "") -> str:
-    row = _session_record()
-    if not row:
-        return "No saved routing decision for this conversation."
-    raw = row.get("model_config") or {}
-    config = json.loads(raw) if isinstance(raw, str) else raw
-    config = config if isinstance(config, dict) else {}
-    route = config.get("session_route") or {}
-    reasoning = config.get("reasoning_config") or {}
-    return (f"Jev route: {route.get('status', 'unrouted/default')}\n"
-            f"Provider: {config.get('provider') or row.get('billing_provider') or 'profile default'}\n"
-            f"Model: {row.get('model') or 'profile default'} "
-            f"({(route.get('owner') or {}).get('model', 'default')})\n"
-            f"Effort: {_effective_effort(reasoning) or 'profile default'} "
-            f"({(route.get('owner') or {}).get('reasoning', 'default')})\n"
-            f"Reason: {route.get('reason') or 'no route recorded'}")
+def _contract_status(host, marker: str, hook: str) -> dict:
+    version = getattr(host, marker, None)
+    hooks = getattr(host, "VALID_HOOKS", ())
+    supported = type(version) is int and version == 1
+    declared = isinstance(hooks, (set, frozenset, list, tuple)) and hook in hooks
+    if supported and declared:
+        return {"status": "available", "reason": "host contract declared", "api_version": version}
+    reason = "host integration missing" if version is None or supported else "unsupported host integration version"
+    return {"status": "unavailable", "reason": reason,
+            "api_version": version if type(version) is int else None}
+
+
+def runtime_health(ctx=None) -> dict:
+    """Inspect this process, never confuse a registered callback with host support.
+
+    Capability declarations do not prove that a selector or provider was called.
+    The command API does not attest the owning profile. Do not read ambient
+    settings or storage through it, even when a session key is bound.
+    """
+    import importlib
+
+    unknown = {"status": "unknown", "reason": "host inspection failed", "api_version": None}
+    routing, telemetry = dict(unknown), dict(unknown)
+    try:
+        host = importlib.import_module("hermes_cli.plugins")
+        routing = _contract_status(host, "SESSION_RUNTIME_SELECTION_API", "select_session_runtime")
+        telemetry = _contract_status(host, "PROVIDER_ATTEMPT_API", "provider_attempt")
+    except Exception:
+        pass
+    routing["scope"] = "launch_profile_only"
+    return {"routing": routing, "telemetry": telemetry, "enabled": None,
+            "config_status": "scope_unverified", "verification": "capability_only"}
+
+
+def _status_text(value) -> str | None:
+    if isinstance(value, str) and 0 < len(value) <= 256 and not any(ord(c) < 32 or ord(c) == 127 for c in value):
+        return value
+    return None
+
+
+_SAVED_REASONS = frozenset({
+    "missing Jev credential", "invalid selection timeout", "routing capacity busy",
+    "first-call candidate rejected", "plugin hook failure", "agent already built",
+    "No valid routing decision",
+    "routing worker unavailable", "routing deadline exceeded", "invalid tier mapping",
+    "no eligible account models", "invalid typed choices", "low Jev confidence",
+    "no supported model and effort pair", "API response exceeded size limit",
+    "API endpoint must use HTTPS without embedded credentials",
+} | {f"{tier}/{effort}" for tier in DEFAULT_TIERS for effort in (*EFFORTS, "manual")})
+
+
+def _known_text(value, allowed, fallback=None):
+    return value if isinstance(value, str) and value in allowed else fallback
+
+
+def _saved_status() -> dict:
+    """Internal parser. Caller must establish owning-profile scope before reading.
+
+    Model/provider are persisted display labels, not sanitized secret-free text.
+    This helper is deliberately not exposed by the unscoped command API.
+    """
+    try:
+        row = _session_record()
+    except Exception:
+        return {"state": "unavailable", "reason": "saved session could not be read"}
+    if row is None:
+        return {"state": "unrecorded", "reason": "no saved session for this conversation"}
+    try:
+        if not isinstance(row, dict):
+            raise ValueError
+        raw = row.get("model_config")
+        if isinstance(raw, str):
+            if len(raw) > 65536:
+                raise ValueError
+            raw = json.loads(raw)
+        config = {} if raw is None else raw
+        if not isinstance(config, dict):
+            raise ValueError
+        route = config.get("session_route", {})
+        reasoning = config.get("reasoning_config", {})
+        route = {} if route is None else route
+        reasoning = {} if reasoning is None else reasoning
+        if not isinstance(route, dict) or not isinstance(reasoning, dict):
+            raise ValueError
+        owners = route.get("owner", {})
+        if not isinstance(owners, dict):
+            raise ValueError
+        return {"state": "saved", "source": "saved_session", "route": {
+            "status": _known_text(route.get("status"), ("routed", "unrouted/default", "fallback", "selecting"), "unknown"),
+            "reason": _known_text(route.get("reason"), _SAVED_REASONS,
+                                  "no route recorded" if route.get("reason") is None else "saved reason not recognized"),
+            "provider": _status_text(config.get("provider")) or _status_text(row.get("billing_provider")),
+            "model": _status_text(row.get("model")),
+            "reasoning_effort": _known_text(_effective_effort(reasoning), ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")),
+            "owner": {key: owners.get(key) if owners.get(key) in ("router", "user", "default") else "default"
+                      for key in ("model", "reasoning")}}}
+    except (ValueError, TypeError, RecursionError):
+        return {"state": "invalid", "reason": "saved routing data is malformed"}
+
+
+def status_snapshot(ctx=None) -> dict:
+    # A session key alone does not prove which profile owns its database row.
+    # Do not add a user-settable scope override to this public command.
+    return {"schema_version": 1, "inspection_scope": "invoking_process",
+            "runtime": runtime_health(ctx),
+            "conversation": {"state": "scope_unverified",
+                             "reason": "owning profile not verified; saved binding withheld"}}
+
+
+def status(_args: str = "", *, ctx=None) -> str:
+    snapshot = status_snapshot(ctx)
+    if _args.strip() == "--json":
+        return json.dumps(snapshot, allow_nan=False)
+    runtime, conversation = snapshot["runtime"], snapshot["conversation"]
+    routing = runtime["routing"]
+    if routing["status"] == "available":
+        lines = ["Routing host contract available (launch profile only; execution unverified)."]
+    elif routing["status"] == "unavailable":
+        lines = [f"Routing unavailable: {routing['reason']}."]
+    else:
+        lines = [f"Routing status unknown: {routing['reason']}."]
+    if runtime["enabled"] is False:
+        lines.append("Routing disabled in plugin settings.")
+    elif runtime["enabled"] is None:
+        lines.append("Plugin enablement could not be verified.")
+    lines.append(f"Provider telemetry contract: {runtime['telemetry']['status']}.")
+    if conversation["state"] != "saved":
+        lines.append(f"Saved conversation: {conversation['reason']}.")
+        return "\n".join(lines)
+    route = conversation["route"]
+    lines.extend([
+        f"Saved Jev route: {route['status']}",
+        f"Provider: {route['provider'] or 'profile default'}",
+        f"Model: {route['model'] or 'profile default'} ({route['owner']['model']})",
+        f"Effort: {route['reasoning_effort'] or 'profile default'} ({route['owner']['reasoning']})",
+        f"Reason: {route['reason']}",
+    ])
+    return "\n".join(lines)

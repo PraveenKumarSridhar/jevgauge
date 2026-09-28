@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/NousResearch/hermes-agent.git",
+  "update_policy": "retain_verified_on_failure",
+  "patch_base_commit": "d0288be5b3330d2442e3907185b8e9d0958297bb",
+  "test_runtime": {"python": "3.14", "node": "24"},
+  "required_api": {
+    "hermes_cli/plugins.py": {"SESSION_RUNTIME_SELECTION_API": 1, "PROVIDER_ATTEMPT_API": 1}
+  },
+  "candidates": [
+    {"name": "restored-baseline", "ref": "959c7649fd806c3996cdd845ee4bd4e0eb1a0276"},
+    {"name": "upstream-main", "ref": "main"}
+  ],
+  "patches": [
+    {"path": "integration/hermes-runtime-selection.patch", "exclude": ["apps/desktop/*"]},
+    {"path": "integration/hermes-runtime-read.patch", "exclude": []}
+  ],
+  "fixtures": [
+    {"source": "integration/tests/test_jev_status_scope.py", "destination": "tests/tui_gateway/test_jev_status_scope.py"},
+    {"source": "jev-router/__init__.py", "destination": "tests/tui_gateway/jev_router_scope_source.py"}
+  ],
+  "tests": [
+    "tests/tui_gateway/test_first_prompt_route_hook.py",
+    "tests/tui_gateway/test_route_manual_switch.py",
+    "tests/agent/test_first_session_route_fallback.py",
+    "tests/agent/test_provider_attempt_evidence.py",
+    "tests/agent/test_codex_first_event_timing.py",
+    "tests/tui_gateway/test_model_switch_reasoning_flag.py",
+    "tests/tui_gateway/test_reasoning_session_scope.py",
+    "tests/tui_gateway/test_deferred_model_switch_confirm.py",
+    "tests/tui_gateway/test_make_agent_provider.py",
+    "tests/tui_gateway/test_runtime_selection_read.py",
+    "tests/tui_gateway/test_jev_status_scope.py",
+    "tests/tui_gateway/contracts/test_generated.py"
+  ],
+  "command_timeout_seconds": 180,
+  "test_timeout_seconds": 900,
+  "test_workers": 4
+}

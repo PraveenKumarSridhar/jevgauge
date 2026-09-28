@@ -23,11 +23,11 @@ Repository = "https://github.com/PraveenKumarSridhar/jevgauge"
 Issues = "https://github.com/PraveenKumarSridhar/jevgauge/issues"
 
 [tool.setuptools]
-packages = ["jevgauge", "jevgauge.static", "jev_router"]
+packages = ["jevgauge", "jevgauge.static", "jev_router", "jev_router.desktop"]
 package-dir = {jevgauge = "src/jevgauge", jev_router = "jev-router"}
 
 [tool.setuptools.package-data]
-jev_router = ["plugin.yaml"]
+jev_router = ["plugin.yaml", "desktop/plugin.js"]
 jevgauge = ["pricing.json", "static/*"]
 
 [tool.pytest.ini_options]

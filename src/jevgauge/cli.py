@@ -24,6 +24,7 @@ import yaml
 PLUGIN = 'jev-router'
 PLUGIN_FILES = ('__init__.py', 'plugin.yaml', 'telemetry.py', 'runtime.json')
 MANIFEST = '.jevgauge-install.json'
+DESKTOP_MANIFEST = '.jevgauge-desktop-install.json'
 REQUIRED_SYMBOLS = {
     'hermes_cli/plugins.py': ('has_hook', 'invoke_hook', 'register_hook', 'register_command', 'get_config'),
     'hermes_cli/auth.py': ('resolve_codex_runtime_credentials',),
@@ -80,14 +81,19 @@ def _plugin_files() -> dict[str, bytes]:
     }
 
 
+def _desktop_plugin_bytes() -> bytes:
+    return resources.files('jev_router').joinpath('desktop/plugin.js').read_bytes()
+
+
 def _hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def _check_paths(home: Path) -> None:
-    for path in (home, home / 'plugins', home / 'plugins' / PLUGIN, home / 'config.yaml'):
+    for path in (home, home / 'plugins', home / 'plugins' / PLUGIN, home / 'config.yaml',
+                 home / 'desktop-plugins', home / 'desktop-plugins' / PLUGIN):
         if path.is_symlink():
-            raise InstallError('Refusing a symlink at the home, plugin, or config destination. Select a physical --home directory and migrate an existing development symlink explicitly.')
+            raise InstallError('Refusing a symlink at the home, plugin, Desktop plugin, or config destination. Select a physical --home directory and migrate an existing development symlink explicitly.')
 
 
 def _clone(value, depth=0, budget=None):
@@ -189,6 +195,69 @@ def _verify_owned(plugin: Path, *, allow_uninstalled=False) -> dict:
         raise InstallError('Refusing unmanaged or locally modified plugin files. Back up and move the directory before reinstalling or removing it.') from None
 
 
+def _desktop_plan(home: Path, content: bytes, *, uninstall: bool = False) -> str:
+    """Inspect the native extension before changing any installed files."""
+    parent = home / 'desktop-plugins'
+    if parent.exists() and not parent.is_dir():
+        raise InstallError('Refusing a non-directory Desktop plugin root.')
+    plugin = parent / PLUGIN
+    if not plugin.exists():
+        return 'absent'
+    if not plugin.is_dir() or plugin.is_symlink():
+        raise InstallError('Refusing an unmanaged Desktop plugin destination.')
+    manifest = plugin / DESKTOP_MANIFEST
+    source = plugin / 'plugin.js'
+    if source.is_symlink() or manifest.is_symlink():
+        raise InstallError('Refusing a symlink in the Desktop plugin destination.')
+    if manifest.exists():
+        try:
+            data = json.loads(manifest.read_text(encoding='utf-8'))
+            if (data != {'owner': 'jevgauge', 'format': 1, 'sha256': _hash(source.read_bytes())}
+                    or (not uninstall and source.read_bytes() != content)):
+                raise ValueError
+        except (OSError, ValueError, UnicodeError):
+            raise InstallError('Desktop plugin differs from the JevGauge package or ownership record. Preserve it before changing the installation.') from None
+        return 'owned'
+    if uninstall:
+        return 'unmanaged'
+    # Adopt an exact manual copy from this package without replacing it.
+    if {entry.name for entry in plugin.iterdir()} == {'plugin.js'} and source.is_file() and source.read_bytes() == content:
+        return 'adopt'
+    raise InstallError('Existing Desktop plugin is unmanaged or differs from this package. Preserve it before installing.')
+
+
+def _install_desktop(home: Path, content: bytes, plan: str) -> None:
+    plugin = home / 'desktop-plugins' / PLUGIN
+    if plan == 'owned':
+        return
+    if plan == 'adopt':
+        _atomic_write(plugin / DESKTOP_MANIFEST,
+                      json.dumps({'owner': 'jevgauge', 'format': 1, 'sha256': _hash(content)}).encode('utf-8'))
+        return
+    plugin.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix='.jevgauge-desktop-', dir=plugin.parent))
+    try:
+        (temporary / 'plugin.js').write_bytes(content)
+        (temporary / DESKTOP_MANIFEST).write_text(
+            json.dumps({'owner': 'jevgauge', 'format': 1, 'sha256': _hash(content)}), encoding='utf-8')
+        temporary.rename(plugin)
+    finally:
+        if temporary.exists():
+            for entry in temporary.iterdir():
+                entry.unlink()
+            temporary.rmdir()
+
+
+def _uninstall_desktop(home: Path, plan: str) -> None:
+    if plan != 'owned':
+        return
+    plugin = home / 'desktop-plugins' / PLUGIN
+    (plugin / 'plugin.js').unlink()
+    (plugin / DESKTOP_MANIFEST).unlink()
+    if not any(plugin.iterdir()):
+        plugin.rmdir()
+
+
 @contextmanager
 def _lock(home: Path):
     home.mkdir(parents=True, exist_ok=True)
@@ -216,6 +285,9 @@ def operate(command: str, home: Path, repo: Path) -> None:
         _check_paths(home)
         config = _read_config(home)
         plugin = home / 'plugins' / PLUGIN
+        desktop_bytes = _desktop_plugin_bytes() if command in ('install', 'uninstall') else b''
+        desktop_plan = (_desktop_plan(home, desktop_bytes, uninstall=command == 'uninstall')
+                        if command in ('install', 'uninstall') else None)
         if command == 'install':
             if plugin.exists():
                 ownership = _verify_owned(plugin, allow_uninstalled=True)
@@ -256,6 +328,7 @@ def operate(command: str, home: Path, repo: Path) -> None:
                         for path in temporary.iterdir():
                             path.unlink()
                         temporary.rmdir()
+            _install_desktop(home, desktop_bytes, desktop_plan)
             _set_enabled(config, True)
             _write_config(home, config)
         elif command == 'enable':
@@ -288,6 +361,7 @@ def operate(command: str, home: Path, repo: Path) -> None:
             else:
                 (plugin / MANIFEST).unlink()
                 plugin.rmdir()
+            _uninstall_desktop(home, desktop_plan)
         print(f'{command.capitalize()} complete. Restart Hermes Desktop to apply changes.')
 
 

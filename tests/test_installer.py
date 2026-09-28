@@ -22,6 +22,7 @@ def installation(tmp_path, monkeypatch):
     (source / 'telemetry.py').write_text('# telemetry fixture\n')
     (source / 'runtime.json').write_text('{}')
     monkeypatch.setattr(cli, '_plugin_files', lambda: {name: (source / name).read_bytes() for name in cli.PLUGIN_FILES})
+    monkeypatch.setattr(cli, '_desktop_plugin_bytes', lambda: b'// native Jev test plugin\n')
     return repo, home
 
 
@@ -41,11 +42,13 @@ def test_install_enable_disable_uninstall_preserves_other_settings(installation)
     assert run(installation, 'install') == 0
     assert run(installation, 'install') == 0
     assert config(home)['plugins']['enabled'] == ['other', 'jev-router']
+    assert (home / 'desktop-plugins/jev-router/plugin.js').read_bytes() == b'// native Jev test plugin\n'
     assert run(installation, 'disable') == 0
     assert config(home)['plugins']['enabled'] == ['other']
     assert run(installation, 'enable') == 0
     assert run(installation, 'uninstall') == 0
     assert not (home / 'plugins/jev-router').exists()
+    assert not (home / 'desktop-plugins/jev-router').exists()
     assert config(home) == {'model': 'original', 'secret': 'hidden', 'plugins': {'enabled': ['other'], 'entries': {'other': {'settings': {'x': 3}}}}}
 
 
@@ -56,6 +59,61 @@ def test_missing_hook_refuses_without_writing(installation, capsys):
     assert run(installation, 'install') == 1
     assert not home.exists()
     assert 'upstream' in capsys.readouterr().err
+
+
+def test_matching_manual_desktop_plugin_is_adopted_without_replacement(installation):
+    _, home = installation
+    plugin = home / 'desktop-plugins/jev-router'
+    plugin.mkdir(parents=True)
+    source = plugin / 'plugin.js'
+    source.write_bytes(b'// native Jev test plugin\n')
+    assert run(installation, 'install') == 0
+    assert source.read_bytes() == b'// native Jev test plugin\n'
+    assert (plugin / cli.DESKTOP_MANIFEST).is_file()
+    (plugin / 'user-notes.txt').write_text('keep')
+    assert run(installation, 'uninstall') == 0
+    assert (plugin / 'user-notes.txt').read_text() == 'keep'
+    assert not source.exists()
+
+
+def test_modified_desktop_plugin_refuses_before_install_changes(installation):
+    _, home = installation
+    plugin = home / 'desktop-plugins/jev-router'
+    plugin.mkdir(parents=True)
+    (plugin / 'plugin.js').write_text('custom code')
+    assert run(installation, 'install') == 1
+    assert (plugin / 'plugin.js').read_text() == 'custom code'
+    assert not (home / 'plugins/jev-router').exists()
+    assert not (home / 'config.yaml').exists()
+
+
+def test_non_directory_desktop_root_refuses_before_install_changes(installation):
+    _, home = installation
+    home.mkdir()
+    (home / 'desktop-plugins').write_text('keep')
+    assert run(installation, 'install') == 1
+    assert (home / 'desktop-plugins').read_text() == 'keep'
+    assert not (home / 'plugins/jev-router').exists()
+    assert not (home / 'config.yaml').exists()
+
+
+def test_modified_managed_desktop_plugin_refuses_uninstall(installation):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    source = home / 'desktop-plugins/jev-router/plugin.js'
+    source.write_text('custom code')
+    assert run(installation, 'uninstall') == 1
+    assert source.read_text() == 'custom code'
+    assert (home / 'plugins/jev-router/__init__.py').exists()
+
+
+def test_unmanaged_desktop_plugin_survives_uninstall(installation):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'desktop-plugins/jev-router'
+    (plugin / cli.DESKTOP_MANIFEST).unlink()
+    assert run(installation, 'uninstall') == 0
+    assert (plugin / 'plugin.js').exists()
 
 
 def test_missing_dependency_refuses(installation):

@@ -16,7 +16,7 @@ JevGauge asks [Jev](https://docs.typesafe.ai/introduction/quickstart) to choose 
 - **Separates capacity from effort.** A small model can still get high reasoning. These are independent decisions, validated as a pair.
 - **Keeps you in charge.** `/model` and `/reasoning` own their respective fields. Compatible manual effort survives a later model change.
 - **Fails open.** Missing credentials, timeouts, invalid decisions, or no compatible candidates preserve the conversation's original defaults.
-- **Shows its work.** A live panel shows choosing, the effective pair, ownership, and a concise policy label. Minimize it or keep it open. `/jev-status` provides a text view.
+- **Shows its work.** A live panel shows choosing, the effective pair, ownership, and a concise policy label. Minimize it or keep it open. `/jev-status` diagnoses loaded host support.
 
 ```mermaid
 flowchart LR
@@ -91,7 +91,7 @@ Close Hermes Desktop before editing its configuration or running installer comma
 python -m jevgauge install --hermes-repo /path/to/hermes-agent
 ```
 
-Restart the integrated Desktop build. The installer copies the plugin into `<home>/plugins/jev-router` and enables it. The internal plugin ID remains `jev-router`; its display name is JevGauge.
+Restart the integrated Desktop build. The installer copies the backend into `<home>/plugins/jev-router` and the native indicator into `<home>/desktop-plugins/jev-router`. It enables the backend in Hermes config; enable **Jev routing** in Desktop Capabilities → Plugins to show the indicator. Both user-scoped plugin directories survive an app bundle replacement. The internal plugin ID remains `jev-router`; its display name is JevGauge.
 
 The installer preserves unrelated YAML values, but normalizes YAML formatting/comments. It refuses unmanaged directories, development symlinks, and modified managed files. It never writes your API key. [Installer details](docs/installation.md).
 
@@ -103,7 +103,7 @@ The installer preserves unrelated YAML values, but normalizes YAML formatting/co
 4. Run `/reasoning high`. The effort becomes manual. Later messages must retain it.
 5. Quit and reopen Desktop, resume that conversation, and send `Reply with exactly RESUMED.` Verify the saved pair.
 
-The panel's **Minimize / Details** control remembers your display preference. It does not disable routing. `/jev-status` reports the saved binding and owners.
+The panel's **Minimize / Details** control remembers your display preference. It does not disable routing. `/jev-status` reports the loaded routing and telemetry contracts. `--json` returns a versioned process diagnostic. Contract availability does not prove routing executed. The current Hermes plugin command API does not verify the owning profile, so this command withholds enablement and saved conversation bindings. The internal saved-record parser is not a public native UI endpoint.
 
 For actual request evidence, inspect `<home>/logs/agent.log` for `Codex request route`. Its provider, model, and effort should match the effective binding. Do not share raw logs without checking them for private content. See the [test checklist and observed evidence](docs/verification.md).
 
@@ -191,3 +191,11 @@ The generic hook, durable binding, manual-override handling, and optional Deskto
 Token counts do not measure subscription quota savings. The contract here is a visible, one-time decision with durable manual control.
 
 MIT licensed. Independent project, not affiliated with or endorsed by Nous Research or TypeSafe. Hero artwork is generated concept art, not a screenshot. [Third-party notices](THIRD_PARTY_NOTICES.md).
+
+### Native Desktop indicator (resilience worktree)
+
+`jev-router/desktop/plugin.js` is a standalone native Desktop extension. It uses the supported titlebar and popover APIs, and does not require a custom Desktop build. Its source is `desktop/*.mjs`; regenerate with `python scripts/build_desktop.py` and test with `node --test tests/desktop/*.test.mjs`. The wheel packages it and `jevgauge install` copies it into Hermes's user plugin directory.
+
+The native indicator requires the early routing integration plus `integration/hermes-runtime-read.patch` on the backend. The second patch adds a read-only, explicitly addressed `session.runtime_selection` RPC. A stock backend without that method displays **Jev: unavailable**. The indicator describes a live session binding, not provider execution or measured savings. Current scope remains the launch profile.
+
+For manual development installation, copy the generated file to `<Hermes home>/desktop-plugins/jev-router/plugin.js`, then enable **Jev routing** in Capabilities → Plugins. Preserve any existing file before replacing it. The installer can adopt an exact manual copy; it refuses a different or locally modified native plugin. Packaging the UI does not protect the backend hook from a stock Hermes update. See the [update compatibility checks](docs/update-compatibility.md).

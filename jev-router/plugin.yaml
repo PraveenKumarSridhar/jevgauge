@@ -1,6 +1,8 @@
 name: jev-router
 version: 0.1.0
 description: Session-scoped Desktop model and reasoning router using TypeSafe Jev.
+python_dependencies:
+  - "httpx>=0.28.1,<1"
 provides_hooks:
   - select_session_runtime
   - provider_attempt
