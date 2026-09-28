@@ -68,6 +68,7 @@ def test_persistent_manual_effort_mode_keeps_profile_effort():
     result = call(ctx=Config(effort_mode="manual"))
     assert result["model"] == "gpt-6-luna"
     assert result["reasoning_effort"] is None
+    assert result["preserve_reasoning"] is True
     assert result["metadata"]["reasoning_effort"] == "medium"
     assert result["metadata"]["owner"] == {"model": "router", "reasoning": "user"}
 
@@ -135,6 +136,7 @@ def test_jev_failure_retains_manual_field_ownership(monkeypatch):
     result = call(user_model=True, user_reasoning=True,
                   model="gpt-6-sol", reasoning_config={"effort": "high"})
     assert result["metadata"]["owner"] == {"model": "user", "reasoning": "user"}
+    assert result["preserve_reasoning"] is True
     assert result["metadata"]["model"] == "gpt-6-sol"
     assert result["metadata"]["reasoning_effort"] == "high"
 

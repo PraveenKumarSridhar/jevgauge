@@ -46,7 +46,7 @@ def _effective_effort(reasoning_config: Any) -> str | None:
 
 def _default(reason: str, *, model: str, provider: str, reasoning_config: Any,
              user_model: bool, user_reasoning: bool) -> dict:
-    return {"metadata": {
+    return {"preserve_reasoning": bool(user_reasoning), "metadata": {
         "label": "JevGauge", "status": "unrouted/default", "reason": reason, "policy_version": POLICY_VERSION,
         "model": model, "provider": provider,
         "reasoning_effort": _effective_effort(reasoning_config),
@@ -297,7 +297,8 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
                 "reasoning": "user" if user_reasoning else "router"},
         }
         return {"model": None if user_model else chosen, "provider": provider,
-                "reasoning_effort": None if user_reasoning else chosen_effort, "metadata": metadata}
+                "reasoning_effort": None if user_reasoning else chosen_effort,
+                "preserve_reasoning": bool(user_reasoning), "metadata": metadata}
     except Exception as exc:
         logger.warning("Jev routing fell back: %s", type(exc).__name__)
         result = _default(str(exc) if isinstance(exc, _Rejected) else type(exc).__name__,

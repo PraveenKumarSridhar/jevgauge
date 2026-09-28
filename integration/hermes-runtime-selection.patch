@@ -1511,7 +1511,7 @@ diff --git a/tui_gateway/server.py b/tui_gateway/server.py
 index 3aabe999..3d085c1e 100644
 --- a/tui_gateway/server.py
 +++ b/tui_gateway/server.py
-@@ -1164,6 +1168,213 @@ def _start_agent_build(sid: str, session: dict) -> None:
+@@ -1164,6 +1168,216 @@ def _start_agent_build(sid: str, session: dict) -> None:
      build_thread.start()
  
  
@@ -1586,6 +1586,9 @@ index 3aabe999..3d085c1e 100644
 +            if not isinstance(metadata, dict):
 +                continue
 +            model, provider, effort = result.get("model"), result.get("provider"), result.get("reasoning_effort")
++            preserve_reasoning = result.get("preserve_reasoning", False)
++            if type(preserve_reasoning) is not bool or (preserve_reasoning and effort is not None):
++                continue
 +            if model is not None and (not isinstance(model, str) or not model.strip() or
 +                                      not isinstance(provider, str) or not provider.strip()):
 +                continue
@@ -1617,7 +1620,7 @@ index 3aabe999..3d085c1e 100644
 +                session["route_fallback"] = original
 +            route = {**annotations(metadata), "status": "routed" if selected else "unrouted/default",
 +                     "owner": {"model": "user" if user_model else "router" if routed_model else "default",
-+                               "reasoning": "user" if user_reasoning else "router" if routed_reasoning else "default"},
++                               "reasoning": "user" if user_reasoning or preserve_reasoning else "router" if routed_reasoning else "default"},
 +                     "model": effective_model, "provider": effective_provider,
 +                     "reasoning_effort": effective_effort}
 +            if selected:
@@ -1725,7 +1728,7 @@ index 3aabe999..3d085c1e 100644
  def _sess_nowait(params, rid):
      sid = params.get("session_id") or ""
      s = _sessions.get(sid)
-@@ -1651,6 +1862,8 @@ def _persist_live_session_runtime(session: dict | None) -> None:
+@@ -1651,6 +1865,8 @@ def _persist_live_session_runtime(session: dict | None) -> None:
              model_config["composer_override_profile"] = composer_profile
          elif "composer_override_profile" in session:
              model_config.pop("composer_override_profile", None)
@@ -1734,7 +1737,7 @@ index 3aabe999..3d085c1e 100644
          if (tier_override := session.get("create_service_tier_override")) is not None:
              # agent.service_tier is None for explicit normal; without this the distinction is erased on every persist.
              model_config["service_tier"] = tier_override or "normal"
-@@ -2256,6 +2469,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
+@@ -2256,6 +2472,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
          "usage": _session_usage_snapshot(session),
          "profile_name": profile_name_for_home(sess.get("profile_home")) or _current_profile_name(),
      }
@@ -1743,7 +1746,7 @@ index 3aabe999..3d085c1e 100644
      with contextlib.suppress(Exception):
          from hermes_cli import __release_date__
          from hermes_cli.version_info import get_version_info
-@@ -2747,6 +2962,14 @@ def _schedule_agent_build(sid: str, delay: float = 0.05) -> None:
+@@ -2747,6 +2965,14 @@ def _schedule_agent_build(sid: str, delay: float = 0.05) -> None:
  
      def _run():
          if (session := _sessions.get(sid)) is not None:

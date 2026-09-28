@@ -72,3 +72,50 @@ def test_metadata_only_result_cannot_claim_a_route(monkeypatch):
     assert route["owner"] == {"model": "default", "reasoning": "default"}
     assert not session.get("model_override")
     assert not session.get("route_fallback")
+
+
+def test_explicit_preserve_directive_keeps_manual_effort_host_owned(monkeypatch):
+    _host(monkeypatch)
+    session = {"source": "desktop", "session_key": "manual-policy", "history": [], "agent": None}
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda name, **kwargs: [{
+        "model": "gpt-6-luna", "provider": "openai-codex", "preserve_reasoning": True,
+        "metadata": {"status": "routed", "owner": {"reasoning": "router"}},
+    }])
+
+    server._apply_first_prompt_route(session, "Summarize this", "ui")
+
+    assert session["session_route"]["owner"] == {"model": "router", "reasoning": "user"}
+    assert session["session_route"]["reasoning_effort"] == "high"
+    assert session["model_override"]["model"] == "gpt-6-luna"
+    assert session.get("create_reasoning_override") is None
+
+
+def test_invalid_preserve_directive_cannot_change_host_ownership(monkeypatch):
+    _host(monkeypatch)
+    session = {"source": "desktop", "session_key": "bad-policy", "history": [], "agent": None}
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda name, **kwargs: [{
+        "model": "gpt-6-luna", "provider": "openai-codex", "preserve_reasoning": "yes",
+        "metadata": {"status": "routed", "owner": {"reasoning": "user"}},
+    }])
+
+    server._apply_first_prompt_route(session, "Summarize this", "ui")
+
+    assert session["session_route"]["status"] == "unrouted/default"
+    assert session["session_route"]["owner"] == {"model": "default", "reasoning": "default"}
+    assert not session.get("model_override")
+
+
+def test_preserve_directive_conflicting_with_effort_is_rejected(monkeypatch):
+    _host(monkeypatch)
+    session = {"source": "desktop", "session_key": "conflicting-policy", "history": [], "agent": None}
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda name, **kwargs: [{
+        "model": "gpt-6-luna", "provider": "openai-codex", "reasoning_effort": "low",
+        "preserve_reasoning": True, "metadata": {"label": "Policy"},
+    }])
+
+    server._apply_first_prompt_route(session, "Summarize this", "ui")
+
+    assert session["session_route"]["status"] == "unrouted/default"
+    assert session["session_route"]["owner"] == {"model": "default", "reasoning": "default"}
+    assert not session.get("model_override")
+    assert not session.get("create_reasoning_override")
