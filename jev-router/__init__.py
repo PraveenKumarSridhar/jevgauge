@@ -13,6 +13,8 @@ import contextvars
 import queue
 import threading
 import time
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit
 from typing import Any
 
@@ -77,26 +79,66 @@ def _remaining():
     return min(2.0, remaining)
 
 
+class _Response:
+    def __init__(self, status_code: int, content: bytes):
+        self.status_code = status_code
+        self._content = content
+
+    def raise_for_status(self):
+        if not 200 <= self.status_code < 300:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return json.loads(self._content.decode("utf-8"))
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_url(request, timeout):
+    return urllib.request.build_opener(_NoRedirect).open(request, timeout=timeout)
+
+
 def _request(method, url, *, headers, body=None, limit=65536):
     """Bound read time and bytes as well as the outer conversation deadline."""
-    import httpx
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
         raise _Rejected("API endpoint must use HTTPS without embedded credentials")
-    with httpx.stream(method, url, headers=headers, json=body, timeout=_remaining()) as response:
+    request_headers = dict(headers)
+    request_headers.setdefault("Accept", "application/json")
+    payload = None
+    if body is not None:
+        payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+    request = urllib.request.Request(
+        url, data=payload, headers=request_headers, method=method.upper())
+    try:
+        response = _open_url(request, _remaining())
+    except urllib.error.HTTPError as exc:
+        response = exc
+    try:
+        final = urlsplit(response.geturl())
+        if final.scheme != "https" or not final.hostname or final.username or final.password:
+            raise _Rejected("API endpoint redirected outside HTTPS")
         chunks, size = [], 0
-        for chunk in response.iter_bytes():
+        while True:
             _remaining()
+            chunk = response.read(min(65536, limit + 1 - size))
+            if not chunk:
+                break
             size += len(chunk)
             if size > limit:
                 raise _Rejected("API response exceeded size limit")
             chunks.append(chunk)
-        return httpx.Response(response.status_code, content=b"".join(chunks), request=response.request)
+        return _Response(int(response.getcode()), b"".join(chunks))
+    finally:
+        response.close()
 
 
 def _live_models() -> list[str]:
     """Only account-scoped slugs; Hermes' synthetic/static fallback is not entitlement evidence."""
-    import httpx
     from hermes_cli.auth import resolve_codex_runtime_credentials
     from hermes_cli.auth_codex import _codex_base_url
     from agent.codex_headers import codex_account_headers

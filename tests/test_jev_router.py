@@ -15,11 +15,34 @@ REAL_DECIDE = router._decide
 REAL_GET_SECRET = router._get_secret
 
 
+class FakeHTTPResponse:
+    def __init__(self, content, *, status=200, url="https://example.com"):
+        self.content = content
+        self.status = status
+        self.url = url
+        self.offset = 0
+
+    def geturl(self):
+        return self.url
+
+    def getcode(self):
+        return self.status
+
+    def read(self, size):
+        chunk = self.content[self.offset:self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+    def close(self):
+        pass
+
+
 def test_manifest_declares_persistent_effort_mode():
     manifest = yaml.safe_load((PLUGIN.parent / "plugin.yaml").read_text())
     assert manifest["config_schema"]["effort_mode"]["type"] == "str"
     assert manifest["config_schema"]["effort_mode"]["default"] == "auto"
-    assert manifest["python_dependencies"] == ["httpx>=0.28.1,<1"]
+    assert "python_dependencies" not in manifest
+    assert "import httpx" not in PLUGIN.read_text(encoding="utf-8")
 
 
 class Config:
@@ -424,21 +447,20 @@ def test_timed_out_workers_are_bounded_and_recover(monkeypatch):
 
 
 def test_http_payload_is_bounded_and_secrets_only_in_header(monkeypatch):
-    import httpx
     seen = []
-    def handler(request):
+    def open_url(request, _timeout):
         seen.append(request)
-        return httpx.Response(200, json={'answers': {}})
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        monkeypatch.setattr(httpx, 'stream', client.stream)
-        REAL_DECIDE('x' * 2000, 'synthetic-key', 'https://api.typesafe.ai/v1/systemone', 'jev-latest')
+        return FakeHTTPResponse(b'{"answers": {}}', url=request.full_url)
+    monkeypatch.setattr(router, '_open_url', open_url)
+    REAL_DECIDE('x' * 2000, 'synthetic-key', 'https://api.typesafe.ai/v1/systemone', 'jev-latest')
     import json
-    body = json.loads(seen[0].content)
+    body = json.loads(seen[0].data)
     assert len(body['state']) == 1200
     assert set(body) == {'state', 'model', 'questions'}
     assert set(body['questions']) == {'model_tier', 'effort_tier'}
-    assert 'synthetic-key' not in seen[0].content.decode()
-    assert seen[0].headers['authorization'] == 'Bearer synthetic-key'
+    assert 'synthetic-key' not in seen[0].data.decode()
+    assert seen[0].get_header('Authorization') == 'Bearer synthetic-key'
+    assert seen[0].get_header('Content-type') == 'application/json'
 
 
 def test_http_rejects_insecure_endpoints_before_transmission():
@@ -447,11 +469,26 @@ def test_http_rejects_insecure_endpoints_before_transmission():
 
 
 def test_http_limits_response_size(monkeypatch):
-    import httpx
-    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b'x'*100))) as client:
-        monkeypatch.setattr(httpx, 'stream', client.stream)
-        with pytest.raises(ValueError, match='size limit'):
-            router._request('GET', 'https://example.com', headers={}, limit=10)
+    monkeypatch.setattr(
+        router, '_open_url',
+        lambda request, timeout: FakeHTTPResponse(b'x' * 100, url=request.full_url),
+    )
+    with pytest.raises(ValueError, match='size limit'):
+        router._request('GET', 'https://example.com', headers={}, limit=10)
+
+
+def test_http_rejects_downgrade_redirect(monkeypatch):
+    monkeypatch.setattr(
+        router, '_open_url',
+        lambda request, timeout: FakeHTTPResponse(b'{}', url='http://example.com/redirected'),
+    )
+    with pytest.raises(ValueError, match='redirected outside HTTPS'):
+        router._request('GET', 'https://example.com', headers={})
+
+
+def test_http_response_rejects_redirect_status():
+    with pytest.raises(RuntimeError, match='HTTP 302'):
+        router._Response(302, b'').raise_for_status()
 
 
 @pytest.mark.parametrize('manual_mode', [False, True])

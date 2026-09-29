@@ -4,6 +4,8 @@ JevGauge's policy and native Desktop indicator are packaged in this repository a
 
 The backend manifest requires `session.turn_route` API 1. Installation also sets `plugins.entries.jev-router.update_admission: required`. A gate-aware Hermes updater reads those two data declarations before activating a fetched Git tree or extracted ZIP. A candidate that does not publish API 1 is refused while the current checkout remains active. Plugin code is not imported during this check, and an ordinary plugin without the explicit config policy cannot veto an application update.
 
+The router declares no third-party Python runtime dependencies. Its bounded HTTPS client uses the standard library, so a future Hermes dependency resolution cannot evict Jev because of a shared `httpx` version conflict.
+
 ```mermaid
 flowchart LR
     A[Fetch exact Hermes candidate] --> B[Read Jev manifest and user update policy]
