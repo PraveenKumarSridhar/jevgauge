@@ -8,16 +8,16 @@ from __future__ import annotations
 
 import argparse
 import ast
-from contextlib import contextmanager
 import hashlib
-from importlib import resources
 import json
 import os
-from pathlib import Path
 import stat
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
+from importlib import resources
+from pathlib import Path
 
 import yaml
 
@@ -207,6 +207,8 @@ def _set_enabled(config: dict, enabled: bool) -> None:
         names.append(PLUGIN)
     entry = plugins.setdefault('entries', {}).setdefault(PLUGIN, {})
     entry.setdefault('settings', {})['enabled'] = enabled
+    if enabled:
+        entry['update_admission'] = 'required'
 
 
 def _atomic_write(path: Path, data: bytes, mode=0o600) -> None:
@@ -262,6 +264,8 @@ def _update_config(home: Path, *, enabled: bool, remove_installer_setting: bool 
         _set_enabled(config, enabled)
         if remove_installer_setting:
             entries = config['plugins']['entries']
+            if entries[PLUGIN].get('update_admission') == 'required':
+                entries[PLUGIN].pop('update_admission')
             settings = entries[PLUGIN]['settings']
             settings.pop('enabled', None)
             if not settings:

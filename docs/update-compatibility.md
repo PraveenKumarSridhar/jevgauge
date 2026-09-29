@@ -2,12 +2,14 @@
 
 JevGauge's policy and native Desktop indicator are packaged in this repository and installed under the Hermes user home. Replacing the Hermes app bundle does not delete those files. Automatic first-call routing requires a versioned Hermes host contract. The installer checks for that contract and refuses unsupported hosts; it does not modify Hermes source.
 
+The backend manifest requires `session.turn_route` API 1. Installation also sets `plugins.entries.jev-router.update_admission: required`. A gate-aware Hermes updater reads those two data declarations before activating a fetched Git tree or extracted ZIP. A candidate that does not publish API 1 is refused while the current checkout remains active. Plugin code is not imported during this check, and an ordinary plugin without the explicit config policy cannot veto an application update.
+
 ```mermaid
 flowchart LR
-    A[Exact Hermes candidate] --> B[Static contract check]
-    B --> C{Native contract present?}
+    A[Fetch exact Hermes candidate] --> B[Read Jev manifest and user update policy]
+    B --> C{Candidate publishes session.turn_route API 1?}
     C -- Yes --> D[Backend and Desktop lifecycle checks]
-    C -- No --> E[Reject, or test legacy patch in disposable checkout]
+    C -- No --> E[Keep current host and refuse activation]
     D --> F{All checks pass?}
     F -- No --> G[Keep current installation; report incompatibility]
     F -- Yes --> H[Install and test fresh plus resumed routes]
@@ -20,6 +22,7 @@ flowchart LR
 | Routing policy, health command and telemetry | Packaged Python plugin in `<home>/plugins/jev-router`; survives an app replacement |
 | Titlebar route indicator | Packaged native plugin in `<home>/desktop-plugins/jev-router`; survives an app replacement and must be enabled in Desktop Capabilities → Plugins |
 | First-call selection, durable binding and addressed read | Versioned Hermes host contract. The Jev plugin consumes it but does not install it. The explicit patches under `integration/` remain a legacy development fallback |
+| Update admission | Generic Hermes updater gate plus the Jev manifest and user config policy. Git admission runs after fetch and before checkout movement; ZIP admission runs after extraction and before the live-file swap |
 
 The native indicator displays `Jev: unavailable` if the backend lacks the read contract. That is a capability diagnosis, not proof that a saved route or provider request is healthy. `jevgauge doctor --hermes-repo /path/to/hermes-agent` checks host symbols and version markers without changing files. A successful doctor is still not a live provider test.
 
@@ -48,4 +51,6 @@ python scripts/check_hermes_update.py \
 
 The checker snapshots an immutable commit, applies patches only in a disposable checkout, runs required tests and writes a receipt. It does not change the candidate source, active Hermes installation, app bundle or update settings. A passing receipt covers legacy backend lifecycle tests under the specified environment. CI reports that matrix as legacy integration and tests the packaged plugin separately against an exact native-contract commit. Before accepting a new Hermes build, also verify the native plugin against its Desktop SDK, build the app, and test a fresh route and a cold-resumed route against the physical provider request log. Keep the previous working build and user data until that acceptance passes.
 
-Do not infer compatibility from a clean patch application or static API marker. The required acceptance boundary is route timing, durable restore, addressed read, and a fresh plus resumed Desktop check. A Hermes update can remove or change the host contract while leaving the user plugins installed. [The upstream proposal](upstream-proposal.md) describes the contract and its overlap with existing Hermes routing proposals. Until that contract merges and ships in Hermes, JevGauge can detect unsupported updates and supply tested integration code, but cannot guarantee automatic routing on every unmodified Hermes release.
+Do not infer compatibility from a clean patch application or static API marker. The required acceptance boundary is route timing, durable restore, addressed read, and a fresh plus resumed Desktop check. A Hermes update can remove or change the host contract while leaving the user plugins installed. [The upstream proposal](upstream-proposal.md) describes the contract and its overlap with existing Hermes routing proposals.
+
+The admission gate and native route contract have not shipped in an official Hermes release. Stock updaters therefore cannot yet enforce the manifest requirement before activation. Until both changes merge and ship, test an exact candidate in a disposable checkout and do not treat plugin-file survival as update safety.

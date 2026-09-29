@@ -93,6 +93,8 @@ python -m jevgauge install --hermes-repo /path/to/hermes-agent
 
 Restart the integrated Desktop build. The installer copies the backend into `<home>/plugins/jev-router` and the native indicator into `<home>/desktop-plugins/jev-router`. It enables the backend in Hermes config; enable **Jev routing** in Desktop Capabilities → Plugins to show the indicator. Both user-scoped plugin directories survive an app bundle replacement. The internal plugin ID remains `jev-router`; its display name is JevGauge.
 
+The plugin declares `session.turn_route` API 1 and the installer opts Jev into required update admission. A gate-aware Hermes updater refuses a candidate that drops that contract before changing the checkout. This protection is implemented in the proposed Hermes host branch and is not present in current stock releases.
+
 The installer preserves unrelated YAML values, but normalizes YAML formatting/comments. It refuses unmanaged directories, development symlinks, and modified managed files. It never writes your API key. [Installer details](docs/installation.md).
 
 ## Try it

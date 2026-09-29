@@ -8,6 +8,8 @@ provides_hooks:
   - provider_attempt
 provides_middleware:
   - turn_route
+requires_host_contracts:
+  session.turn_route: 1
 config_schema:
   enabled:
     type: bool

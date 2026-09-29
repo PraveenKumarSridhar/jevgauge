@@ -1,7 +1,9 @@
-from pathlib import Path
 import json
+from pathlib import Path
+
 import pytest
 import yaml
+
 from jevgauge import cli
 
 
@@ -44,12 +46,13 @@ def config(home):
 
 
 def test_install_enable_disable_uninstall_preserves_other_settings(installation):
-    repo, home = installation
+    _repo, home = installation
     home.mkdir()
     (home / 'config.yaml').write_text('model: original\nsecret: hidden\nplugins:\n  enabled: [other]\n  entries:\n    other:\n      settings: {x: 3}\n')
     assert run(installation, 'install') == 0
     assert run(installation, 'install') == 0
     assert config(home)['plugins']['enabled'] == ['other', 'jev-router']
+    assert config(home)['plugins']['entries']['jev-router']['update_admission'] == 'required'
     assert (home / 'desktop-plugins/jev-router/plugin.js').read_bytes() == b'// native Jev test plugin\n'
     assert run(installation, 'disable') == 0
     assert config(home)['plugins']['enabled'] == ['other']
@@ -418,8 +421,8 @@ def test_partial_uninstall_can_be_retried(installation, monkeypatch):
 
 def test_same_size_upgrade_does_not_execute_stale_cache(installation, monkeypatch):
     import importlib.util
-    import py_compile
     import os
+    import py_compile
     _, home = installation
     monkeypatch.setattr(cli, '_plugin_files', lambda: {'__init__.py': b'VALUE = 1\n', 'plugin.yaml': b'name: jev-router\n', 'telemetry.py': b'', 'runtime.json': b'{}'})
     assert run(installation, 'install') == 0
@@ -479,8 +482,13 @@ def test_distributable_plugin_has_standalone_telemetry_and_dashboard_runtime():
     assert json.loads(files['runtime.json']) == {'python': sys.executable}
 
 
+def test_distributable_plugin_declares_exact_native_host_contract():
+    manifest = yaml.safe_load(cli._plugin_files()['plugin.yaml'])
+    assert manifest['requires_host_contracts'] == {'session.turn_route': 1}
+
+
 def test_dashboard_cli_dispatches_without_installing(tmp_path, monkeypatch):
-    import jevgauge.dashboard as dashboard
+    from jevgauge import dashboard
     observed = []
     monkeypatch.setattr(dashboard, 'serve', lambda home, **kwargs: observed.append((home, kwargs)))
     assert cli.main(['dashboard', '--home', str(tmp_path), '--demo', '--port', '8766', '--open']) == 0

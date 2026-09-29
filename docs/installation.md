@@ -18,6 +18,8 @@ Existing plugin symlinks or unmanaged directories are refused. For development s
 
 The native indicator is installed in `<home>/desktop-plugins/jev-router/plugin.js`. Enable **Jev routing** separately in Desktop Capabilities → Plugins. An exact manually installed copy is adopted without replacement; a different or edited copy is refused. Legacy JevGauge ownership manifests can be removed and upgraded without touching unknown files. Desktop removal writes an owned tombstone before deleting code, so an interrupted uninstall can be retried. The installer accepts either the native `turn_route` plus `session.turn_route.read` contract or the pinned legacy runtime-selection contract. It refuses unsupported hosts before writing either plugin.
 
+Installation marks Jev as requiring update admission in Hermes config and ships `requires_host_contracts: {session.turn_route: 1}` in the plugin manifest. A Hermes build containing the generic admission gate will refuse an incompatible Git or ZIP candidate before replacing the live checkout. Current official Hermes releases do not contain that gate, so this setting becomes enforceable only after the host change ships.
+
 ## Clean wheel smoke
 
 ```sh
