@@ -2,13 +2,39 @@
 const routeLabel = value => typeof value === 'string' && value.length <= 120 && /^[a-zA-Z0-9_.:/-]+$/.test(value) ? value : null;
 const effortValues = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
-export function createRouteController(host, publish, {timeoutMs=35000}={}) {
+export function createRouteController(host, publish, {timeoutMs=35000,storage=null}={}) {
   let disposed=false, generation=0, currentKey=null, pending=null, queued=false;
   const subscriptions=[];
   const timers=new Set();
+  const confirmed=new Map();
   let initializing=true;
   const show=(label, detail) => { if (!disposed) publish({label,detail}); };
   const unavailable=() => show('Jev: unavailable','Routing integration could not be verified in this backend.');
+  function attribution(captured) {
+    if (!storage || !captured?.owner || !captured.stored) return null;
+    const records=storage.get('routedSessions',[]);
+    if (!Array.isArray(records)) return null;
+    return records.find(item => item?.connectionId===captured.owner.connectionId && item?.profile===captured.owner.profile && item?.storedSessionId===captured.stored) || null;
+  }
+  function renderRoutedStart(captured) {
+    if (!storage) {unavailable(); return;}
+    const record=attribution(captured);
+    if (!record) {show('Jev: unrouted','This conversation has no Jev route attribution. Use Start routed chat for a new routed conversation.'); return;}
+    const info=confirmed.get(record.runtimeId);
+    const requestedModel=routeLabel(record.model), requestedEffort=effortValues.includes(record.reasoningEffort) ? record.reasoningEffort : null;
+    if (info) {
+      const model=routeLabel(info.model), effort=effortValues.includes(info.reasoning_effort) ? info.reasoning_effort : null;
+      const matches=record.status==='default' || (model===requestedModel && effort===requestedEffort && info.provider===record.provider);
+      if (!matches) {show('Jev: route mismatch','Hermes reported a different live binding than Jev requested.'); return;}
+      show(`Jev: ${model || 'default'}${effort ? ' · '+effort : ''}${record.status==='default' ? ' (default)' : ''}`,
+        `Live session binding from a Jev routed start. Provider: ${routeLabel(info.provider) || 'unknown'}. Provider execution is not verified by this display.`);
+      return;
+    }
+    if (record.status==='routed' && requestedModel) {
+      show(`Jev: requested ${requestedModel}${requestedEffort ? ' · '+requestedEffort : ''}`,
+        'Jev supplied these values before Hermes created the session. Awaiting a matching live session.info event.');
+    } else show('Jev: defaults requested','Jev abstained, so Hermes created this session with its profile defaults. Awaiting live binding confirmation.');
+  }
   function identity() {
     const state=host.state;
     const owner=state.focusedSessionOwner.get();
@@ -64,7 +90,7 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
     if (captured.key!==currentKey) {
       currentKey=captured.key; generation++; pending=null; queued=false;
       if (captured.unknown) unavailable();
-      else if (!captured.runtime || !captured.stored) show('Jev: new chat','Awaiting a session. Routing support has not been verified.');
+      else if (!captured.runtime || !captured.stored) show('Jev: routed start ready','Enter the first prompt in the Jev popover to create a routed session.');
       else show('Jev: checking','Reading this conversation’s routing state.');
     }
     if (captured.unknown || !captured.runtime || !captured.stored) return;
@@ -93,7 +119,7 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
       .then(data => {
         if (!disposed && requestGeneration===generation && identity().key===captured.key) render(data,captured);
       }).catch(() => {
-        if (!disposed && requestGeneration===generation) unavailable();
+        if (!disposed && requestGeneration===generation) renderRoutedStart(captured);
       }).finally(() => {clearTimeout(timeout); timers.delete(timeout); if (pending===requestGeneration) {
           pending=null;
           if (queued && !expired && !disposed) {queued=false; refresh();}
@@ -114,5 +140,15 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
     for (const stop of subscriptions.splice(0)) stop();
     unavailable();
   }
-  return {refresh, dispose() {disposed=true; generation++; for (const timer of timers) clearTimeout(timer); timers.clear(); for (const stop of subscriptions.splice(0)) stop();}};
+  function observe(event) {
+    if (event?.type==='session.info' && typeof event.session_id==='string' && event.payload && typeof event.payload==='object') {
+      confirmed.set(event.session_id,{model:event.payload.model,provider:event.payload.provider,
+        reasoning_effort:event.payload.reasoning_effort_wire || event.payload.reasoning_effort});
+      let captured;
+      try {captured=identity();} catch {captured=null;}
+      if (captured && attribution(captured)?.runtimeId===event.session_id) {renderRoutedStart(captured); return;}
+    }
+    refresh();
+  }
+  return {refresh,observe, dispose() {disposed=true; generation++; for (const timer of timers) clearTimeout(timer); timers.clear(); for (const stop of subscriptions.splice(0)) stop();}};
 }

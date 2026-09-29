@@ -1,15 +1,15 @@
 # Hermes update compatibility
 
-JevGauge's policy and native Desktop indicator are packaged in this repository and installed under the Hermes user home. Replacing the Hermes app bundle does not delete those files. Automatic first-call routing requires a versioned Hermes host contract. The installer checks for that contract and refuses unsupported hosts; it does not modify Hermes source.
+JevGauge's policy, route API, and native Desktop indicator are packaged in this repository and installed under the Hermes user home. Replacing the Hermes app bundle does not delete those files. The stock fallback selects before `session.create`, submits the first prompt, and opens the stored session through public plugin APIs. Automatic routing from the ordinary composer still requires the optional native route contract. The installer checks for either complete seam and never modifies Hermes source.
 
-The backend manifest requires `session.turn_route` API 1. Installation also sets `plugins.entries.jev-router.update_admission: required`. A gate-aware Hermes updater reads those two data declarations before activating a fetched Git tree or extracted ZIP. A candidate that does not publish API 1 is refused while the current checkout remains active. Plugin code is not imported during this check, and an ordinary plugin without the explicit config policy cannot veto an application update.
+The backend manifest requires `desktop.plugin_routed_session` API 1. Installation also sets `plugins.entries.jev-router.update_admission: required`. A gate-aware Hermes updater reads those two data declarations before activating a fetched Git tree or extracted ZIP. A candidate that does not publish API 1 is refused while the current checkout remains active. Plugin code is not imported during this check, and an ordinary plugin without the explicit config policy cannot veto an application update.
 
 The router declares no third-party Python runtime dependencies. Its bounded HTTPS client uses the standard library, so a future Hermes dependency resolution cannot evict Jev because of a shared `httpx` version conflict.
 
 ```mermaid
 flowchart LR
     A[Fetch exact Hermes candidate] --> B[Read Jev manifest and user update policy]
-    B --> C{Candidate publishes session.turn_route API 1?}
+    B --> C{Candidate publishes desktop.plugin_routed_session API 1?}
     C -- Yes --> D[Backend and Desktop lifecycle checks]
     C -- No --> E[Keep current host and refuse activation]
     D --> F{All checks pass?}
@@ -23,10 +23,11 @@ flowchart LR
 |---|---|
 | Routing policy, health command and telemetry | Packaged Python plugin in `<home>/plugins/jev-router`; survives an app replacement |
 | Titlebar route indicator | Packaged native plugin in `<home>/desktop-plugins/jev-router`; survives an app replacement and must be enabled in Desktop Capabilities → Plugins |
-| First-call selection, durable binding and addressed read | Versioned Hermes host contract. The Jev plugin consumes it but does not install it. The explicit patches under `integration/` remain a legacy development fallback |
+| Explicit first-call selection and durable binding | Jev-owned Desktop action plus the stock routed-session host contract |
+| Automatic ordinary composer routing and addressed read | Optional native `session.turn_route` contract proposed upstream |
 | Update admission | Generic Hermes updater gate plus the Jev manifest and user config policy. Git admission runs after fetch and before checkout movement; ZIP admission runs after extraction and before the live-file swap |
 
-The native indicator displays `Jev: unavailable` if the backend lacks the read contract. That is a capability diagnosis, not proof that a saved route or provider request is healthy. `jevgauge doctor --hermes-repo /path/to/hermes-agent` checks host symbols and version markers without changing files. A successful doctor is still not a live provider test.
+On stock hosts without a route-read RPC, the indicator displays a requested route only for Jev-owned routed starts, then promotes it to a live binding after a matching `session.info` event. It labels other conversations unrouted. `jevgauge doctor --hermes-repo /path/to/hermes-agent` checks host symbols and ordering without changing files. A successful doctor is still not a live provider test.
 
 ## Repo-only alternatives checked
 
@@ -34,7 +35,7 @@ The native indicator displays `Jev: unavailable` if the backend lacks the read c
 |---|---|
 | General plugin hooks | Hermes documents `pre_llm_call` as context injection and `pre_api_request` as an observer whose result is ignored. Neither selects the provider before Desktop constructs an agent. See [plugin hooks](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/plugins/index.md). |
 | Model-provider plugin | A profile can register its own inference transport, but Hermes resolves the provider and model as that profile. A virtual Jev provider would need to reimplement credential resolution, protocol dispatch, effort validation and physical-attempt accounting for the real target models. This is a different, larger integration with uncertain session semantics. See [provider plugin API](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/model-provider-plugin.md). |
-| Desktop plugin SDK | It can render the route and make addressed RPC calls, but it does not change backend first-call selection. See [Desktop plugin SDK](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/desktop-plugin-sdk.md). |
+| Desktop plugin SDK alone | It cannot intercept the ordinary composer. Jev combines its explicit action with `session.create` overrides before agent construction. See [Desktop plugin SDK](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/desktop-plugin-sdk.md). |
 | External update wrapper or local Git patch | It can test a specific candidate and keep a working local build. It cannot cover every official update path or make a missing API appear in an unmodified release. |
 
 ## Candidate process
@@ -55,4 +56,4 @@ The checker snapshots an immutable commit, applies patches only in a disposable 
 
 Do not infer compatibility from a clean patch application or static API marker. The required acceptance boundary is route timing, durable restore, addressed read, and a fresh plus resumed Desktop check. A Hermes update can remove or change the host contract while leaving the user plugins installed. [The upstream proposal](upstream-proposal.md) describes the contract and its overlap with existing Hermes routing proposals.
 
-The admission gate and native route contract have not shipped in an official Hermes release. Stock updaters therefore cannot yet enforce the manifest requirement before activation. Until both changes merge and ship, test an exact candidate in a disposable checkout and do not treat plugin-file survival as update safety.
+The admission gate has not shipped in an official Hermes release. Stock updaters therefore cannot yet enforce the manifest requirement before activation. Until it merges and ships, test an exact candidate in a disposable checkout and do not treat plugin-file survival as update safety. The explicit routed-start path remains available whenever `doctor` detects the baseline seam, even if the optional automatic route hook is absent.

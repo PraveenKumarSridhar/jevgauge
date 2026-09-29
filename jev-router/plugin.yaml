@@ -7,7 +7,7 @@ provides_hooks:
 provides_middleware:
   - turn_route
 requires_host_contracts:
-  session.turn_route: 1
+  desktop.plugin_routed_session: 1
 config_schema:
   enabled:
     type: bool

@@ -102,6 +102,29 @@ def test_routing_capability_and_provider_telemetry_are_independent(command):
     assert 'execution unverified' in invoke('')
 
 
+def test_stock_routed_start_backend_is_reported_without_claiming_automatic_routing(command, monkeypatch):
+    invoke, _, host = command
+    del host.SESSION_RUNTIME_SELECTION_API
+    host.VALID_HOOKS.discard('select_session_runtime')
+    sys.modules['hermes_cli.middleware'].VALID_MIDDLEWARE = set()
+    contracts = ModuleType('tui_gateway.contracts')
+    create_params = type('SessionCreateParams', (), {'model_fields': {
+        'model': object(), 'provider': object(), 'reasoning_effort': object()}})
+    contracts.METHODS = {name: object() for name in ('prompt.submit', 'model.options', 'config.get')}
+    contracts.METHODS['session.create'] = type('Contract', (), {'params': create_params})()
+    methods = ModuleType('tui_gateway.methods_session')
+    methods._create_overrides = lambda params: params
+    parent = ModuleType('tui_gateway')
+    parent.contracts = contracts
+    monkeypatch.setitem(sys.modules, 'tui_gateway', parent)
+    monkeypatch.setitem(sys.modules, 'tui_gateway.contracts', contracts)
+    monkeypatch.setitem(sys.modules, 'tui_gateway.methods_session', methods)
+    runtime = json.loads(invoke('--json'))['runtime']
+    assert runtime['routing']['contract'] == 'routed_start'
+    assert runtime['routing']['scope'] == 'focused_profile_explicit'
+    assert 'Start routed chat' in invoke('')
+
+
 def test_registered_status_does_not_claim_ambient_enablement(command):
     invoke, ctx, _ = command
     for value in (True, False):

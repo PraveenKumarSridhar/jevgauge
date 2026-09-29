@@ -261,7 +261,7 @@ def _route(*, ctx, message: str, source: str, provider: str, model: str,
     kwargs = dict(ctx=ctx, message=message, provider=provider, model=model,
                   reasoning_config=reasoning_config, user_model=user_model,
                   user_reasoning=user_reasoning, model_only=model_only,
-                  host_validates=host_validates)
+                  host_validates=host_validates, eligible_models=_kw.get("eligible_models"))
     def default(reason):
         return _default(reason, model=model, provider=provider, reasoning_config=reasoning_config,
                         user_model=user_model, user_reasoning=user_reasoning)
@@ -307,7 +307,7 @@ def _route(*, ctx, message: str, source: str, provider: str, model: str,
 
 
 def _select(*, ctx, message, provider, model, reasoning_config, user_model, user_reasoning,
-            model_only=False, host_validates=False):
+            model_only=False, host_validates=False, eligible_models=None):
     # A persistent manual mode leaves the profile's reasoning effort in charge for new chats.
     user_reasoning = user_reasoning or ctx.get_config("effort_mode", "auto") == "manual"
     api_key = _get_secret(ctx)
@@ -320,7 +320,9 @@ def _select(*, ctx, message, provider, model, reasoning_config, user_model, user
         tiers = ctx.get_config("tier_models", DEFAULT_TIERS)
         if not isinstance(tiers, dict):
             raise _Rejected("invalid tier mapping")
-        live = None if model_only or host_validates else set(_live_models())
+        live = ({item for item in eligible_models if isinstance(item, str)}
+                if isinstance(eligible_models, (list, tuple, set))
+                else (None if model_only or host_validates else set(_live_models())))
         eligible = {
             tier: [
                 candidate.strip() for candidate in options
@@ -554,6 +556,24 @@ def _turn_route_status(host) -> dict:
             "contract": None, "scope": "unknown"}
 
 
+def _routed_start_status() -> dict:
+    try:
+        from tui_gateway.contracts import METHODS
+        from tui_gateway.methods_session import _create_overrides
+        create = METHODS.get("session.create")
+        fields = set(getattr(getattr(create, "params", None), "model_fields", {}))
+        available = ({"model", "provider", "reasoning_effort"} <= fields
+                     and {"prompt.submit", "model.options", "config.get"} <= set(METHODS)
+                     and callable(_create_overrides))
+    except Exception:
+        available = False
+    if available:
+        return {"status": "available", "reason": "stock routed-session backend declared",
+                "api_version": 1, "contract": "routed_start", "scope": "focused_profile_explicit"}
+    return {"status": "unavailable", "reason": "host integration missing", "api_version": None,
+            "contract": None, "scope": "unknown"}
+
+
 def runtime_health(ctx=None) -> dict:
     """Inspect this process, never confuse a registered callback with host support.
 
@@ -566,6 +586,7 @@ def runtime_health(ctx=None) -> dict:
     unknown = {"status": "unknown", "reason": "host inspection failed", "api_version": None}
     routing, telemetry = dict(unknown), dict(unknown)
     native = None
+    routed_start = _routed_start_status()
     try:
         native = _turn_route_status(importlib.import_module("hermes_cli.middleware"))
     except Exception:
@@ -579,6 +600,8 @@ def runtime_health(ctx=None) -> dict:
             routing = native
         elif legacy["status"] == "available":
             routing = legacy
+        elif routed_start["status"] == "available":
+            routing = routed_start
         elif native is not None:
             routing = native
         else:
@@ -586,7 +609,7 @@ def runtime_health(ctx=None) -> dict:
         telemetry = _contract_status(host, "PROVIDER_ATTEMPT_API", "provider_attempt")
     except Exception:
         if native is not None:
-            routing = native
+            routing = routed_start if routed_start["status"] == "available" else native
     return {"routing": routing, "telemetry": telemetry, "enabled": None,
             "config_status": "scope_unverified", "verification": "capability_only"}
 
@@ -674,6 +697,7 @@ def status(_args: str = "", *, ctx=None) -> str:
     routing = runtime["routing"]
     if routing["status"] == "available":
         scope = ("addressed profile" if routing.get("scope") == "addressed_profile"
+                 else "focused profile via Start routed chat" if routing.get("scope") == "focused_profile_explicit"
                  else "launch profile only")
         lines = [f"Routing host contract available ({scope}; execution unverified)."]
     elif routing["status"] == "unavailable":

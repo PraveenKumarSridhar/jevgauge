@@ -60,15 +60,15 @@ The result is selection evidence. It does not prove a physical provider attempt,
 
 ## JevGauge migration
 
-The repo-owned plugin now registers native `turn_route` middleware when the host exposes `TURN_ROUTE_API_VERSION = 1` and retains `select_session_runtime` as a legacy fallback. Under the native contract it selects model and reasoning independently, reads its TypeSafe token through `PluginContext.get_secret`, and lets the host validate the selected pair. It no longer imports Hermes private account-catalog or credential helpers on that path. The Desktop indicator reads `session.turn_route.read` first, then falls back to the legacy `session.runtime_selection` RPC.
+The repo-owned plugin now has a stock **Start routed chat** path that reads the host's public model inventory and reasoning default, asks Jev, and passes the selected values to `session.create` before submitting the prompt. It registers native `turn_route` middleware when the host exposes `TURN_ROUTE_API_VERSION = 1` and retains `select_session_runtime` as a legacy fallback. The stock and native paths do not depend on private account-catalog or credential helpers. The Desktop indicator reads `session.turn_route.read` first, then the legacy `session.runtime_selection` RPC, then plugin-owned routed-start attribution.
 
-The installer accepts either complete contract and rejects partial marker-only hosts. Provider-attempt telemetry is optional, so missing dashboard evidence does not disable model routing.
+The installer accepts the complete stock seam, native contract, or legacy contract and rejects partial marker-only hosts. Provider-attempt telemetry is optional, so missing dashboard evidence does not disable model routing.
 
 ## Compatibility promise
 
 A Hermes update is compatible only when the complete contract and lifecycle tests pass. User-scoped plugin files surviving an app replacement do not prove that the new host can execute them. `jevgauge doctor` is the static gate, followed by fresh-chat and cold-resume checks against the exact candidate.
 
-Until the contract merges and appears in a Hermes release, JevGauge cannot promise routing on every unmodified release. The legacy patch remains a development fallback in a disposable checkout, not an installation strategy.
+Until the admission gate merges and appears in a Hermes release, JevGauge cannot promise that an official updater will reject every future incompatible host before activation. The explicit routed-start path works on stock releases where `doctor` detects the baseline seam. The legacy patch remains a development fallback in a disposable checkout.
 
 ## Later work
 

@@ -1,7 +1,6 @@
 """Config writes must preserve unrelated settings, reject bad input, and detect races."""
 import importlib
 import json
-from pathlib import Path
 
 import pytest
 import yaml
@@ -18,7 +17,9 @@ def owned_plugin(tmp_path):
     plugin.mkdir(parents=True)
     contents=_plugin_files()
     for name, data in contents.items():
-        (plugin/name).write_bytes(data)
+        path=plugin/name
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(data)
     (plugin/MANIFEST).write_text(json.dumps({'owner':'jevgauge','format':1,
         'files':{name:_hash(data) for name,data in contents.items()}}))
     return plugin

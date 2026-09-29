@@ -1,0 +1,10 @@
+{
+  "name": "jev-router",
+  "label": "Jev routing",
+  "description": "Profile-scoped route selection for the Jev Desktop plugin.",
+  "icon": "Route",
+  "version": "0.1.0",
+  "tab": {"hidden": true},
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

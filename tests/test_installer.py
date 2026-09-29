@@ -27,10 +27,19 @@ def installation(tmp_path, monkeypatch):
     home = tmp_path / 'User home'
     source = tmp_path / 'source'
     source.mkdir()
-    (source / '__init__.py').write_text('# router\n')
-    (source / 'plugin.yaml').write_text('name: jev-router\n')
-    (source / 'telemetry.py').write_text('# telemetry fixture\n')
-    (source / 'runtime.json').write_text('{}')
+    fixture_files = {
+        '__init__.py': '# router\n', 'plugin.yaml': 'name: jev-router\n',
+        'telemetry.py': '# telemetry fixture\n', 'runtime.json': '{}',
+        'dashboard/__init__.py': '',
+        'dashboard/manifest.json': '{"api":"plugin_api.py"}',
+        'dashboard/plugin_api.py': '# route API\n',
+        'dashboard/dist/__init__.py': '',
+        'dashboard/dist/index.js': '// backend only\n',
+    }
+    for name, content in fixture_files.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
     monkeypatch.setattr(cli, '_plugin_files', lambda: {name: (source / name).read_bytes() for name in cli.PLUGIN_FILES})
     monkeypatch.setattr(cli, '_desktop_plugin_bytes', lambda: b'// native Jev test plugin\n')
     return repo, home
@@ -70,7 +79,48 @@ def test_missing_hook_refuses_without_writing(installation, capsys):
     (repo / 'tui_gateway/methods_turn_route.py').unlink()
     assert run(installation, 'install') == 1
     assert not home.exists()
-    assert 'turn_route' in capsys.readouterr().err
+    assert 'routed session' in capsys.readouterr().err
+
+
+def test_stock_routed_start_contract_is_compatible(tmp_path):
+    repo = tmp_path / 'stock-hermes'
+    for relative, names in cli.REQUIRED_SYMBOLS.items():
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('\n'.join(f'def {name}(): pass' for name in names))
+    contracts = repo / 'tui_gateway/contracts/sessions.py'
+    contracts.parent.mkdir(parents=True, exist_ok=True)
+    contracts.write_text('''
+class SessionCreateParams:
+    model: str | None = None
+    provider: str | None = None
+    reasoning_effort: str | None = None
+method("session.create", params=SessionCreateParams)
+''')
+    prompt = repo / 'tui_gateway/contracts/prompt_voice.py'
+    prompt.write_text('method("prompt.submit")\n')
+    config_models = repo / 'tui_gateway/contracts/config_free_tier_control.py'
+    config_models.write_text('method("model.options")\nmethod("config.get")\n')
+    methods = repo / 'tui_gateway/methods_session.py'
+    methods.write_text('''
+def _create_overrides(params): pass
+def _create_session(rid, params):
+    model_override = params.get("model")
+    reasoning_override = params.get("reasoning_effort")
+    _schedule_agent_build("sid")
+''')
+    sdk = repo / 'apps/desktop/src/sdk/index.ts'
+    sdk.parent.mkdir(parents=True, exist_ok=True)
+    sdk.write_text('profileRoutes requestProfile retainProfile openSession')
+    plugin_sdk = repo / 'apps/desktop/src/contrib/plugin.ts'
+    plugin_sdk.parent.mkdir(parents=True, exist_ok=True)
+    plugin_sdk.write_text('interface PluginContext { rest: unknown }')
+    dashboard = repo / 'hermes_cli/web_server_dashboard.py'
+    dashboard.write_text('def _plugin_route_secret_scope(): pass\ndef _mount_plugin_api_routes(): pass\n')
+    (repo / 'agent').mkdir(exist_ok=True)
+    (repo / 'agent/secret_scope.py').write_text('def get_secret(name): pass\n')
+    (repo / 'hermes_cli/config.py').write_text('def load_config_readonly(): return {}\n')
+    assert cli.check_compatibility(repo) == 'routed_start'
 
 
 def test_native_contract_does_not_require_legacy_private_catalog_helpers(installation):
@@ -480,11 +530,25 @@ def test_distributable_plugin_has_standalone_telemetry_and_dashboard_runtime():
     assert 'telemetry.py' in files
     assert b'class EventStore' in files['telemetry.py']
     assert json.loads(files['runtime.json']) == {'python': sys.executable}
+    assert set(files) == set(cli.PLUGIN_FILES)
+    assert b'"api": "plugin_api.py"' in files['dashboard/manifest.json']
 
 
-def test_distributable_plugin_declares_exact_native_host_contract():
+def test_distributable_plugin_declares_resilient_baseline_host_contract():
     manifest = yaml.safe_load(cli._plugin_files()['plugin.yaml'])
-    assert manifest['requires_host_contracts'] == {'session.turn_route': 1}
+    assert manifest['requires_host_contracts'] == {'desktop.plugin_routed_session': 1}
+
+
+def test_nested_dashboard_files_are_owned_and_removed(installation):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    assert (plugin / 'dashboard/manifest.json').is_file()
+    assert (plugin / 'dashboard/plugin_api.py').is_file()
+    (plugin / 'dashboard/user-note.txt').write_text('keep')
+    assert run(installation, 'uninstall') == 0
+    assert (plugin / 'dashboard/user-note.txt').read_text() == 'keep'
+    assert not (plugin / 'dashboard/manifest.json').exists()
 
 
 def test_dashboard_cli_dispatches_without_installing(tmp_path, monkeypatch):
@@ -502,9 +566,11 @@ def test_legacy_plugin_can_be_uninstalled_before_dashboard_upgrade(installation)
     plugin = home / 'plugins/jev-router'
     manifest_path = plugin / cli.MANIFEST
     manifest = json.loads(manifest_path.read_text())
-    for name in ('telemetry.py', 'runtime.json'):
+    for name in set(cli.PLUGIN_FILES) - {'__init__.py', 'plugin.yaml'}:
         (plugin / name).unlink()
         del manifest['files'][name]
+    (plugin / 'dashboard/dist').rmdir()
+    (plugin / 'dashboard').rmdir()
     manifest_path.write_text(json.dumps(manifest))
     assert run(installation, 'uninstall') == 0
     assert not plugin.exists()
@@ -516,7 +582,7 @@ def test_legacy_upgrade_preserves_unowned_new_filenames(installation):
     plugin = home / 'plugins/jev-router'
     manifest_path = plugin / cli.MANIFEST
     manifest = json.loads(manifest_path.read_text())
-    for name in ('telemetry.py', 'runtime.json'):
+    for name in set(cli.PLUGIN_FILES) - {'__init__.py', 'plugin.yaml'}:
         del manifest['files'][name]
     manifest_path.write_text(json.dumps(manifest))
     (plugin / 'telemetry.py').write_text('# user-owned unrelated file')

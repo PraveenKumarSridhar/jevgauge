@@ -16,9 +16,9 @@ When cache or user files remain after uninstall, a small ownership record remain
 
 Existing plugin symlinks or unmanaged directories are refused. For development symlinks, keep the symlink and configure the plugin manually, or back it up and move it aside before managed installation. There is intentionally no force-overwrite flag.
 
-The native indicator is installed in `<home>/desktop-plugins/jev-router/plugin.js`. Enable **Jev routing** separately in Desktop Capabilities → Plugins. An exact manually installed copy is adopted without replacement; a different or edited copy is refused. Legacy JevGauge ownership manifests can be removed and upgraded without touching unknown files. Desktop removal writes an owned tombstone before deleting code, so an interrupted uninstall can be retried. The installer accepts either the native `turn_route` plus `session.turn_route.read` contract or the pinned legacy runtime-selection contract. It refuses unsupported hosts before writing either plugin.
+The native indicator is installed in `<home>/desktop-plugins/jev-router/plugin.js`. Enable **Jev routing** separately in Desktop Capabilities → Plugins. The backend also ships a profile-scoped `/api/plugins/jev-router/route` endpoint under its owned `dashboard/` directory. An exact manually installed Desktop copy is adopted without replacement; a different or edited copy is refused. Legacy JevGauge ownership manifests can be removed and upgraded without touching unknown files. Desktop removal writes an owned tombstone before deleting code, so an interrupted uninstall can be retried. The installer accepts the stock routed-session seam, the native `turn_route` plus `session.turn_route.read` contract, or the pinned legacy runtime-selection contract. It refuses unsupported hosts before writing either plugin.
 
-Installation marks Jev as requiring update admission in Hermes config and ships `requires_host_contracts: {session.turn_route: 1}` in the plugin manifest. A Hermes build containing the generic admission gate will refuse an incompatible Git or ZIP candidate before replacing the live checkout. Current official Hermes releases do not contain that gate, so this setting becomes enforceable only after the host change ships.
+Installation marks Jev as requiring update admission in Hermes config and ships `requires_host_contracts: {desktop.plugin_routed_session: 1}` in the plugin manifest. A Hermes build containing the generic admission gate will refuse an incompatible Git or ZIP candidate before replacing the live checkout. Current official Hermes releases do not contain that gate, so this setting becomes enforceable only after the host change ships.
 
 ## Clean wheel smoke
 
@@ -31,7 +31,7 @@ This creates an isolated environment and a temporary home with spaces in the pat
 
 ## Troubleshooting
 
-- **Missing routing contract:** the checkout is unsupported. Use a Hermes release that provides the native route and read contract, or follow the isolated legacy integration guide. Adding only a marker is not integration.
+- **Missing routing contract:** the checkout is unsupported. Use a Hermes release that provides the routed-session seam or the native route contract. Adding only a marker is not integration.
 - **No indicator:** confirm the Desktop plugin is enabled, the backend contract passes `doctor`, and the GUI and backend use the same checkout. Then start a new eligible chat.
 - **Defaults retained:** check `/jev-status`. Typical causes: missing TypeSafe key, no account candidates, timeout, or confidence below threshold.
 - **Nothing routes:** check the enabled list, plugin setting, `openai-codex`, and whether this is already an existing conversation. Legacy integration is limited to the launch profile.

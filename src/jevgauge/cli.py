@@ -11,6 +11,7 @@ import ast
 import hashlib
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -22,7 +23,15 @@ from pathlib import Path
 import yaml
 
 PLUGIN = 'jev-router'
-PLUGIN_FILES = ('__init__.py', 'plugin.yaml', 'telemetry.py', 'runtime.json')
+PLUGIN_FILES = (
+    '__init__.py', 'plugin.yaml', 'telemetry.py', 'runtime.json',
+    'dashboard/__init__.py', 'dashboard/manifest.json', 'dashboard/plugin_api.py',
+    'dashboard/dist/__init__.py', 'dashboard/dist/index.js',
+)
+LEGACY_PLUGIN_FILE_SETS = (
+    {'__init__.py', 'plugin.yaml'},
+    {'__init__.py', 'plugin.yaml', 'telemetry.py', 'runtime.json'},
+)
 MANIFEST = '.jevgauge-install.json'
 DESKTOP_MANIFEST = '.jevgauge-desktop-install.json'
 LEGACY_DESKTOP_MANIFEST = '.jevgauge-ui-install.json'
@@ -59,6 +68,10 @@ def _assigned_constant(tree: ast.AST, name: str, expected) -> bool:
 
 
 def _declares_rpc(tree: ast.AST, name: str) -> bool:
+    for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+        if (isinstance(call.func, ast.Name) and call.func.id == 'method' and call.args
+                and isinstance(call.args[0], ast.Constant) and call.args[0].value == name):
+            return True
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -100,7 +113,66 @@ def _routing_contract(repo: Path, plugins_tree: ast.AST) -> str | None:
         return 'turn_route'
     if _assigned_constant(plugins_tree, 'SESSION_RUNTIME_SELECTION_API', 1):
         return 'select_session_runtime'
+    if _routed_start_contract(repo):
+        return 'routed_start'
     return None
+
+
+def _routed_start_contract(repo: Path) -> bool:
+    """Detect the stock, source-free routed-session seam Jev actually consumes."""
+    sessions = _parse_optional(repo, 'tui_gateway/contracts/sessions.py')
+    prompt = _parse_optional(repo, 'tui_gateway/contracts/prompt_voice.py')
+    config_models = _parse_optional(repo, 'tui_gateway/contracts/config_free_tier_control.py')
+    methods = _parse_optional(repo, 'tui_gateway/methods_session.py')
+    dashboard = _parse_optional(repo, 'hermes_cli/web_server_dashboard.py')
+    secrets = _parse_optional(repo, 'agent/secret_scope.py')
+    config = _parse_optional(repo, 'hermes_cli/config.py')
+    if None in (sessions, prompt, config_models, methods, dashboard, secrets, config):
+        return False
+    fields = set()
+    for node in sessions.body:
+        if isinstance(node, ast.ClassDef) and node.name == 'SessionCreateParams':
+            fields = {item.target.id for item in node.body
+                      if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)}
+    if not {'model', 'provider', 'reasoning_effort'} <= fields:
+        return False
+    if (not _declares_rpc(sessions, 'session.create') or not _declares_rpc(prompt, 'prompt.submit')
+            or not _declares_rpc(config_models, 'model.options')
+            or not _declares_rpc(config_models, 'config.get')):
+        return False
+    functions = {node.name: node for node in ast.walk(methods)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    create = functions.get('_create_session')
+    if '_create_overrides' not in functions or create is None:
+        return False
+    scheduled = [node.lineno for node in ast.walk(create)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == '_schedule_agent_build']
+    bound = [node.lineno for node in ast.walk(create)
+             if isinstance(node, (ast.Assign, ast.AnnAssign))
+             and any(isinstance(target, ast.Name) and target.id in {
+                 'model_override', 'session_model_override', 'reasoning_override', 'create_reasoning_override'}
+                     for root in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                     for target in ast.walk(root))]
+    if not scheduled or not bound or max(bound) >= min(scheduled):
+        return False
+    dashboard_functions = {node.name for node in ast.walk(dashboard)
+                           if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    if not {'_plugin_route_secret_scope', '_mount_plugin_api_routes'} <= dashboard_functions:
+        return False
+    if not any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == 'get_secret'
+               for node in ast.walk(secrets)):
+        return False
+    if not any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == 'load_config_readonly'
+               for node in ast.walk(config)):
+        return False
+    try:
+        sdk = (repo / 'apps/desktop/src/sdk/index.ts').read_text(encoding='utf-8')
+        plugin_sdk = (repo / 'apps/desktop/src/contrib/plugin.ts').read_text(encoding='utf-8')
+    except (OSError, UnicodeError):
+        return False
+    return (all(symbol in sdk for symbol in ('profileRoutes', 'requestProfile', 'retainProfile', 'openSession'))
+            and 'rest:' in plugin_sdk)
 
 
 def _check_symbols(repo: Path, requirements: dict[str, tuple[str, ...]], parsed: dict) -> None:
@@ -123,12 +195,13 @@ def check_compatibility(repo: Path) -> str:
     contract = _routing_contract(repo, parsed['hermes_cli/plugins.py'])
     if not contract:
         raise InstallError(
-            'Hermes lacks the native turn_route plus session.turn_route.read contract and the '
-            'legacy SESSION_RUNTIME_SELECTION_API = 1 contract. Update Hermes to a compatible '
+            'Hermes lacks the routed session contract Jev needs, the native turn_route plus '
+            'session.turn_route.read contract, and the legacy SESSION_RUNTIME_SELECTION_API = 1 contract. Update Hermes to a compatible '
             'release or use the documented isolated development integration; this installer never patches Hermes.')
     _check_symbols(
         repo,
-        NATIVE_REQUIRED_SYMBOLS if contract == 'turn_route' else LEGACY_REQUIRED_SYMBOLS,
+        NATIVE_REQUIRED_SYMBOLS if contract == 'turn_route' else
+        (LEGACY_REQUIRED_SYMBOLS if contract == 'select_session_runtime' else {}),
         parsed,
     )
     return contract
@@ -141,6 +214,11 @@ def _plugin_files() -> dict[str, bytes]:
         'plugin.yaml': source.joinpath('plugin.yaml').read_bytes(),
         'telemetry.py': resources.files('jevgauge').joinpath('telemetry.py').read_bytes(),
         'runtime.json': json.dumps({'python': sys.executable}).encode('utf-8'),
+        'dashboard/__init__.py': source.joinpath('dashboard/__init__.py').read_bytes(),
+        'dashboard/manifest.json': source.joinpath('dashboard/manifest.json').read_bytes(),
+        'dashboard/plugin_api.py': source.joinpath('dashboard/plugin_api.py').read_bytes(),
+        'dashboard/dist/__init__.py': source.joinpath('dashboard/dist/__init__.py').read_bytes(),
+        'dashboard/dist/index.js': source.joinpath('dashboard/dist/index.js').read_bytes(),
     }
 
 
@@ -291,10 +369,11 @@ def _verify_owned(plugin: Path, *, allow_uninstalled=False) -> dict:
         source_mtime = data.get('source_mtime', 0) if valid else 0
         if type(source_mtime) is not int or not 0 <= source_mtime < 2**32 - 1:
             raise ValueError
-        if not isinstance(hashes, dict) or set(hashes) not in (set(PLUGIN_FILES), {'__init__.py', 'plugin.yaml'}):
+        if not isinstance(hashes, dict) or (set(hashes) != set(PLUGIN_FILES)
+                                            and set(hashes) not in LEGACY_PLUGIN_FILE_SETS):
             raise ValueError
         for name in hashes:
-            path = plugin / name
+            path = _owned_path(plugin, name)
             if state == 'uninstalled' and not path.exists() and not path.is_symlink():
                 continue
             if path.is_symlink() or not path.is_file() or _hash(path.read_bytes()) != hashes[name]:
@@ -302,6 +381,36 @@ def _verify_owned(plugin: Path, *, allow_uninstalled=False) -> dict:
         return data
     except (OSError, ValueError, UnicodeError):
         raise InstallError('Refusing unmanaged or locally modified plugin files. Back up and move the directory before reinstalling or removing it.') from None
+
+
+def _owned_path(plugin: Path, name: str) -> Path:
+    relative = Path(name)
+    if relative.is_absolute() or not relative.parts or any(part in ('', '.', '..') for part in relative.parts):
+        raise ValueError('invalid owned path')
+    current = plugin
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
+            raise ValueError('invalid owned parent')
+    return plugin / relative
+
+
+def _write_owned(plugin: Path, name: str, data: bytes, mode=0o644) -> None:
+    path = _owned_path(plugin, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, data, mode)
+
+
+def _remove_owned(plugin: Path, name: str) -> None:
+    path = _owned_path(plugin, name)
+    path.unlink(missing_ok=True)
+    parent = path.parent
+    while parent != plugin:
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
 
 
 def _desktop_plan(home: Path, content: bytes, *, uninstall: bool = False) -> str:
@@ -476,16 +585,17 @@ def operate(command: str, home: Path, repo: Path) -> None:
                 else:
                     # A retained ownership tombstone allows reinstall without touching
                     # user files or caches. It also makes interrupted deletion retryable.
-                    if any((plugin / name).exists() or (plugin / name).is_symlink() for name in set(contents) - set(ownership['files'])):
+                    if any(_owned_path(plugin, name).exists() or _owned_path(plugin, name).is_symlink()
+                           for name in set(contents) - set(ownership['files'])):
                         raise InstallError('Upgrade would overwrite an unowned plugin file. Move that file explicitly before upgrading.')
                     for name in ownership['files']:
-                        (plugin / name).unlink(missing_ok=True)
+                        _remove_owned(plugin, name)
                     previous_mtime = ownership.get('source_mtime', 0)
                     source_mtime = max(int(time.time()), int(previous_mtime) + 1)
                     ownership.update(state='uninstalled', files={name: _hash(data) for name, data in contents.items()}, source_mtime=source_mtime)
                     _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
                     for name, data in contents.items():
-                        _atomic_write(plugin / name, data, 0o644)
+                        _write_owned(plugin, name, data)
                     # Keep timestamp-based Python caches from executing a previous
                     # same-size version installed within the same clock second.
                     os.utime(plugin / '__init__.py', (source_mtime, source_mtime))
@@ -497,14 +607,14 @@ def operate(command: str, home: Path, repo: Path) -> None:
                 temporary = Path(tempfile.mkdtemp(prefix='.jevgauge-', dir=plugin.parent))
                 try:
                     for name, data in contents.items():
-                        (temporary / name).write_bytes(data)
+                        path = temporary / name
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(data)
                     (temporary / MANIFEST).write_text(json.dumps({'owner': 'jevgauge', 'format': 1, 'files': {name: _hash(data) for name, data in contents.items()}}, indent=2), encoding='utf-8')
                     temporary.rename(plugin)
                 finally:
                     if temporary.exists():
-                        for path in temporary.iterdir():
-                            path.unlink()
-                        temporary.rmdir()
+                        shutil.rmtree(temporary)
             _install_desktop(home, desktop_bytes, desktop_plan)
             _update_config(home, enabled=True)
         elif command == 'enable':
@@ -522,7 +632,7 @@ def operate(command: str, home: Path, repo: Path) -> None:
                 ownership['state'] = 'uninstalled'
                 _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
                 for name in ownership['files']:
-                    (plugin / name).unlink(missing_ok=True)
+                    _remove_owned(plugin, name)
                 if any(path.name != MANIFEST for path in plugin.iterdir()):
                     print('Owned plugin files removed; user files and caches preserved with an ownership record for reinstall.')
                 else:

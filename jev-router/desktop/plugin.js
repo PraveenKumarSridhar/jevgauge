@@ -3,13 +3,39 @@
 const routeLabel = value => typeof value === 'string' && value.length <= 120 && /^[a-zA-Z0-9_.:/-]+$/.test(value) ? value : null;
 const effortValues = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 
-export function createRouteController(host, publish, {timeoutMs=35000}={}) {
+export function createRouteController(host, publish, {timeoutMs=35000,storage=null}={}) {
   let disposed=false, generation=0, currentKey=null, pending=null, queued=false;
   const subscriptions=[];
   const timers=new Set();
+  const confirmed=new Map();
   let initializing=true;
   const show=(label, detail) => { if (!disposed) publish({label,detail}); };
   const unavailable=() => show('Jev: unavailable','Routing integration could not be verified in this backend.');
+  function attribution(captured) {
+    if (!storage || !captured?.owner || !captured.stored) return null;
+    const records=storage.get('routedSessions',[]);
+    if (!Array.isArray(records)) return null;
+    return records.find(item => item?.connectionId===captured.owner.connectionId && item?.profile===captured.owner.profile && item?.storedSessionId===captured.stored) || null;
+  }
+  function renderRoutedStart(captured) {
+    if (!storage) {unavailable(); return;}
+    const record=attribution(captured);
+    if (!record) {show('Jev: unrouted','This conversation has no Jev route attribution. Use Start routed chat for a new routed conversation.'); return;}
+    const info=confirmed.get(record.runtimeId);
+    const requestedModel=routeLabel(record.model), requestedEffort=effortValues.includes(record.reasoningEffort) ? record.reasoningEffort : null;
+    if (info) {
+      const model=routeLabel(info.model), effort=effortValues.includes(info.reasoning_effort) ? info.reasoning_effort : null;
+      const matches=record.status==='default' || (model===requestedModel && effort===requestedEffort && info.provider===record.provider);
+      if (!matches) {show('Jev: route mismatch','Hermes reported a different live binding than Jev requested.'); return;}
+      show(`Jev: ${model || 'default'}${effort ? ' · '+effort : ''}${record.status==='default' ? ' (default)' : ''}`,
+        `Live session binding from a Jev routed start. Provider: ${routeLabel(info.provider) || 'unknown'}. Provider execution is not verified by this display.`);
+      return;
+    }
+    if (record.status==='routed' && requestedModel) {
+      show(`Jev: requested ${requestedModel}${requestedEffort ? ' · '+requestedEffort : ''}`,
+        'Jev supplied these values before Hermes created the session. Awaiting a matching live session.info event.');
+    } else show('Jev: defaults requested','Jev abstained, so Hermes created this session with its profile defaults. Awaiting live binding confirmation.');
+  }
   function identity() {
     const state=host.state;
     const owner=state.focusedSessionOwner.get();
@@ -65,7 +91,7 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
     if (captured.key!==currentKey) {
       currentKey=captured.key; generation++; pending=null; queued=false;
       if (captured.unknown) unavailable();
-      else if (!captured.runtime || !captured.stored) show('Jev: new chat','Awaiting a session. Routing support has not been verified.');
+      else if (!captured.runtime || !captured.stored) show('Jev: routed start ready','Enter the first prompt in the Jev popover to create a routed session.');
       else show('Jev: checking','Reading this conversation’s routing state.');
     }
     if (captured.unknown || !captured.runtime || !captured.stored) return;
@@ -94,7 +120,7 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
       .then(data => {
         if (!disposed && requestGeneration===generation && identity().key===captured.key) render(data,captured);
       }).catch(() => {
-        if (!disposed && requestGeneration===generation) unavailable();
+        if (!disposed && requestGeneration===generation) renderRoutedStart(captured);
       }).finally(() => {clearTimeout(timeout); timers.delete(timeout); if (pending===requestGeneration) {
           pending=null;
           if (queued && !expired && !disposed) {queued=false; refresh();}
@@ -115,7 +141,104 @@ export function createRouteController(host, publish, {timeoutMs=35000}={}) {
     for (const stop of subscriptions.splice(0)) stop();
     unavailable();
   }
-  return {refresh, dispose() {disposed=true; generation++; for (const timer of timers) clearTimeout(timer); timers.clear(); for (const stop of subscriptions.splice(0)) stop();}};
+  function observe(event) {
+    if (event?.type==='session.info' && typeof event.session_id==='string' && event.payload && typeof event.payload==='object') {
+      confirmed.set(event.session_id,{model:event.payload.model,provider:event.payload.provider,
+        reasoning_effort:event.payload.reasoning_effort_wire || event.payload.reasoning_effort});
+      let captured;
+      try {captured=identity();} catch {captured=null;}
+      if (captured && attribution(captured)?.runtimeId===event.session_id) {renderRoutedStart(captured); return;}
+    }
+    refresh();
+  }
+  return {refresh,observe, dispose() {disposed=true; generation++; for (const timer of timers) clearTimeout(timer); timers.clear(); for (const stop of subscriptions.splice(0)) stop();}};
+}
+
+// Pure routed-session action shared by the installed plugin and Node tests.
+const MODEL = /^[a-zA-Z0-9_.:/-]{1,120}$/;
+const EFFORTS = new Set(['none','minimal','low','medium','high','xhigh','max','ultra']);
+const ATTRIBUTION_KEY = 'routedSessions';
+const MAX_ATTRIBUTIONS = 64;
+const MAX_PROMPT_CHARS = 12000;
+
+function ownerRoute(host, routes) {
+  const owner=host.state.focusedSessionOwner.get();
+  if (!owner?.connectionId || !owner?.profile) throw new Error('No focused Hermes profile is available.');
+  const activeProfile=host.state.profile?.get?.();
+  const activeConnection=host.state.connectionId?.get?.();
+  if ((activeProfile && activeProfile!==owner.profile) || (activeConnection && activeConnection!==owner.connectionId)) {
+    throw new Error('Focus the target profile before starting a routed chat.');
+  }
+  const matches=routes.filter(route => route?.connectionId===owner.connectionId && route?.profile===owner.profile && route?.targetProfile);
+  if (matches.length!==1) throw new Error('Jev could not resolve one unique profile route.');
+  return matches[0];
+}
+
+function routePlan(value) {
+  if (!value || value.schema_version!=='jevgauge.routed_start.v1' || !['routed','default'].includes(value.status)) {
+    throw new Error('Jev returned an invalid routing plan.');
+  }
+  if (value.status==='default') return {schema_version:value.schema_version,status:'default',reason:String(value.reason || 'selection kept profile defaults').slice(0,240)};
+  if (!MODEL.test(value.model || '') || value.provider!=='openai-codex' || !EFFORTS.has(value.reasoning_effort)) {
+    throw new Error('Jev returned an unsupported model, provider, or reasoning effort.');
+  }
+  return {schema_version:value.schema_version,status:'routed',model:value.model,provider:value.provider,
+    reasoning_effort:value.reasoning_effort,reason:String(value.reason || '').slice(0,240)};
+}
+
+function persistAttribution(storage, record) {
+  const current=storage.get(ATTRIBUTION_KEY,[]);
+  const safe=Array.isArray(current) ? current.filter(item => item && typeof item==='object') : [];
+  const deduped=safe.filter(item => !(item.connectionId===record.connectionId && item.profile===record.profile && item.storedSessionId===record.storedSessionId));
+  storage.set(ATTRIBUTION_KEY,[record,...deduped].slice(0,MAX_ATTRIBUTIONS));
+}
+
+export function routedSessionAttribution(storage, owner, storedSessionId) {
+  if (!owner?.connectionId || !owner?.profile || !storedSessionId) return null;
+  const records=storage.get(ATTRIBUTION_KEY,[]);
+  if (!Array.isArray(records)) return null;
+  return records.find(item => item?.connectionId===owner.connectionId && item?.profile===owner.profile && item?.storedSessionId===storedSessionId) || null;
+}
+
+export async function createRoutedStart(host, ctx, rawPrompt) {
+  const prompt=typeof rawPrompt==='string' ? rawPrompt : '';
+  if (!prompt.trim()) throw new Error('Enter a first prompt.');
+  if (prompt.length>MAX_PROMPT_CHARS) throw new Error(`First prompt must be ${MAX_PROMPT_CHARS.toLocaleString()} characters or fewer.`);
+  const route=ownerRoute(host,await host.profileRoutes());
+  const release=await host.retainProfile(route,{spawnPriority:'foreground'});
+  try {
+    const options=await host.requestProfile(route,'model.options',{explicit_only:false},5000,{spawnPriority:'foreground'});
+    const reasoning=await host.requestProfile(route,'config.get',{key:'reasoning'},5000,{spawnPriority:'foreground'});
+    const model=typeof options?.model==='string' ? options.model : '';
+    const provider=typeof options?.provider==='string' ? options.provider : '';
+    const providerRow=Array.isArray(options?.providers) ? options.providers.find(row => row?.slug===provider) : null;
+    const unavailable=new Set(Array.isArray(providerRow?.unavailable_models) ? providerRow.unavailable_models : []);
+    const eligibleModels=providerRow?.authenticated!==false && Array.isArray(providerRow?.models)
+      ? providerRow.models.filter(item => typeof item==='string' && MODEL.test(item) && !unavailable.has(item)).slice(0,256) : [];
+    const plan=routePlan(await ctx.rest('/route',{method:'POST',body:{message:prompt,model,provider,
+      reasoning_effort:reasoning?.value,eligible_models:eligibleModels},timeoutMs:12000}));
+    const createParams={source:'desktop'};
+    if (plan.status==='routed') Object.assign(createParams,{model:plan.model,provider:plan.provider,reasoning_effort:plan.reasoning_effort});
+    const created=await host.requestProfile(route,'session.create',createParams,15000,{spawnPriority:'foreground'});
+    const runtimeId=typeof created?.session_id==='string' ? created.session_id : '';
+    const storedSessionId=typeof created?.stored_session_id==='string' ? created.stored_session_id : '';
+    if (!runtimeId || !storedSessionId) throw new Error('Hermes did not return a durable session identity.');
+    const submitted=await host.requestProfile(route,'prompt.submit',{session_id:runtimeId,text:prompt},15000,{spawnPriority:'foreground'});
+    if (!submitted || !['streaming','queued','steered','redirected'].includes(submitted.status)) {
+      throw new Error('Hermes did not accept the first prompt.');
+    }
+    try {
+      persistAttribution(ctx.storage,{connectionId:route.connectionId,profile:route.profile,runtimeId,storedSessionId,
+        status:plan.status,model:plan.model || null,provider:plan.provider || null,reasoningEffort:plan.reasoning_effort || null,
+        reason:plan.reason || '',createdAt:new Date().toISOString()});
+    } catch {
+      // Attribution is a display aid. A storage failure cannot cancel an accepted prompt.
+    }
+    await host.openSession(storedSessionId,{route,awaitHydration:true,expectHistory:true});
+    return {runtimeId,storedSessionId,route,plan};
+  } finally {
+    release();
+  }
 }
 
 import { host, Popover, PopoverTrigger, PopoverContent } from '@hermes/plugin-sdk';
@@ -126,12 +249,15 @@ function RouteIndicator({ctx}) {
   const [value,setValue]=useState({label:'Jev: checking',detail:'Reading routing support.'});
   const [compact,setCompact]=useState(() => ctx.storage.get('compact',false)===true);
   const [controller,setController]=useState(null);
+  const [prompt,setPrompt]=useState('');
+  const [starting,setStarting]=useState(false);
+  const [actionStatus,setActionStatus]=useState('');
   useEffect(() => {
-    const active=createRouteController(host,setValue);
+    const active=createRouteController(host,setValue,{storage:ctx.storage});
     setController(active);
     // No repair or restart. Poll only while the app is visible, at background priority.
     const cancel=ctx.setInterval(() => {if (document.visibilityState==='visible') active.refresh();},15000);
-    const off=ctx.onEvent('session.info',() => active.refresh());
+    const off=ctx.onEvent('session.info',event => active.observe(event));
     return () => {cancel(); off(); active.dispose();};
   },[ctx]);
   return jsxs(Popover,{children:[
@@ -140,9 +266,28 @@ function RouteIndicator({ctx}) {
       style:{WebkitAppRegion:'no-drag',fontSize:12,maxWidth:360,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:'4px 8px',borderRadius:6},
       children:compact && !value.label.includes('unavailable') && !value.label.includes('unsupported') ? 'Jev' : value.label
     })}),
-    jsxs(PopoverContent,{align:'end',style:{fontSize:12,width:300},children:[
+    jsxs(PopoverContent,{align:'end',style:{fontSize:12,width:340},children:[
       jsx('div',{style:{fontWeight:600,marginBottom:8},children:value.label}),
       jsx('p',{children:value.detail}),
+      jsxs('form',{onSubmit:async event => {
+        event.preventDefault();
+        if(starting) return;
+        setStarting(true);setActionStatus('Choosing a route before Hermes creates the session.');
+        try {
+          await createRoutedStart(host,ctx,prompt);
+          setPrompt('');setActionStatus('Routed session created and prompt submitted.');controller?.refresh();
+        } catch {
+          setActionStatus('Routed start failed. Check the Hermes gateway log for the rejected step.');
+        } finally {setStarting(false);}
+      },style:{display:'grid',gap:8,marginTop:12},children:[
+        jsx('label',{htmlFor:'jev-routed-first-prompt',style:{fontWeight:600},children:'Start routed chat'}),
+        jsx('textarea',{id:'jev-routed-first-prompt',value:prompt,maxLength:12000,rows:4,disabled:starting,
+          onChange:event=>setPrompt(event.target.value),placeholder:'First prompt',
+          style:{width:'100%',resize:'vertical',font:'inherit',padding:8,borderRadius:6}}),
+        jsx('button',{type:'submit',disabled:starting || !prompt.trim(),children:starting ? 'Starting…' : 'Start routed chat'}),
+        jsx('p',{style:{margin:0,opacity:.78},children:'This action works on compatible stock Hermes. The regular composer routes automatically only when Hermes provides the optional native turn-route hook.'}),
+        actionStatus ? jsx('p',{role:'status',style:{margin:0},children:actionStatus}) : null
+      ]}),
       jsxs('div',{style:{display:'flex',gap:12,marginTop:12},children:[
         jsx('button',{type:'button',onClick:() => {const next=!compact;setCompact(next);ctx.storage.set('compact',next);},children:compact ? 'Show model in title bar' : 'Minimize label'}),
         jsx('button',{type:'button',onClick:() => controller?.refresh(),children:'Refresh'})

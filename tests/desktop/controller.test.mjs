@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRouteController } from '../../desktop/controller.mjs';
+import { createRoutedStart } from '../../desktop/routed-start.mjs';
 
 function atom(value) {
   const listeners = new Set();
@@ -35,6 +36,83 @@ test('uses exact connection-qualified route and displays selected pair', async (
   assert.deepEqual(t.calls[0].params,{session_id:'runtime',stored_session_id:'durable'});
   assert.equal(t.calls[0].route,t.routes[0]); t.calls[0].resolve(response()); await flush();
   assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna · low'); t.controller.dispose();
+});
+
+test('routed start selects before create, submits before open, and persists no prompt', async () => {
+  const calls=[];
+  const route={connectionId:'local',profile:'default',targetProfile:'default',mode:'local'};
+  const storage={value:[],get(_key,fallback){return this.value ?? fallback;},set(_key,value){this.value=value;}};
+  const host={
+    state:{focusedSessionOwner:{get:()=>({connectionId:'local',profile:'default'})}},
+    profileRoutes:async()=>[route],
+    retainProfile:async()=>{calls.push(['retain']);return()=>calls.push(['release']);},
+    requestProfile:async(_route,method,params)=>{
+      calls.push([method,params]);
+      if(method==='model.options') return {model:'gpt-6-sol',provider:'openai-codex',providers:[{slug:'openai-codex',models:['gpt-6-luna','gpt-6-sol']}]};
+      if(method==='config.get') return {value:'medium'};
+      if(method==='session.create') return {session_id:'runtime-1',stored_session_id:'stored-1',info:{model:'gpt-6-sol'}};
+      if(method==='prompt.submit') return {status:'streaming',user_row_id:1};
+      throw new Error('unexpected');
+    },
+    openSession:async(id,options)=>calls.push(['open',id,options]),
+  };
+  const ctx={storage,rest:async(path,options)=>{
+    calls.push(['route',path,options]);
+    return {schema_version:'jevgauge.routed_start.v1',status:'routed',model:'gpt-6-sol',provider:'openai-codex',reasoning_effort:'high'};
+  }};
+  const result=await createRoutedStart(host,ctx,'private prompt');
+  assert.equal(result.storedSessionId,'stored-1');
+  assert.deepEqual(calls.map(call=>call[0]),['retain','model.options','config.get','route','session.create','prompt.submit','open','release']);
+  assert.deepEqual(calls[4][1],{source:'desktop',model:'gpt-6-sol',provider:'openai-codex',reasoning_effort:'high'});
+  assert.equal(calls[6][1],'stored-1');
+  assert.deepEqual(calls[6][2],{route,awaitHydration:true,expectHistory:true});
+  assert.equal(JSON.stringify(storage.value).includes('private prompt'),false);
+});
+
+test('routed start releases the retained route and does not persist on submit failure', async () => {
+  const calls=[];
+  const route={connectionId:'local',profile:'default',targetProfile:'default',mode:'local'};
+  const storage={value:[],get(){return this.value;},set(_key,value){this.value=value;}};
+  const host={state:{focusedSessionOwner:{get:()=>({connectionId:'local',profile:'default'})}},
+    profileRoutes:async()=>[route],retainProfile:async()=>()=>calls.push('release'),
+    requestProfile:async(_route,method)=>method==='model.options'
+      ? {model:'gpt-6-sol',provider:'openai-codex',providers:[{slug:'openai-codex',models:['gpt-6-sol']}]}
+      : method==='config.get' ? {value:'medium'}
+      : method==='session.create' ? {session_id:'r',stored_session_id:'s',info:{}}
+      : Promise.reject(new Error('submit failed')),
+    openSession:async()=>calls.push('open')};
+  const ctx={storage,rest:async()=>({schema_version:'jevgauge.routed_start.v1',status:'default'})};
+  await assert.rejects(()=>createRoutedStart(host,ctx,'hello'),/submit failed/);
+  assert.deepEqual(calls,['release']);
+  assert.deepEqual(storage.value,[]);
+});
+
+test('routed start fails closed on ambiguous owner routes', async () => {
+  const route={connectionId:'local',profile:'default',targetProfile:'default',mode:'local'};
+  const host={state:{focusedSessionOwner:{get:()=>({connectionId:'local',profile:'default'})}},profileRoutes:async()=>[route,route]};
+  const ctx={storage:{get:()=>[],set:()=>{}},rest:async()=>{throw new Error('must not select');}};
+  await assert.rejects(()=>createRoutedStart(host,ctx,'hello'),/unique profile route/);
+});
+
+test('routed start refuses a focused profile that does not own plugin REST scope', async () => {
+  const route={connectionId:'local',profile:'worker',targetProfile:'worker',mode:'local'};
+  const host={state:{focusedSessionOwner:{get:()=>({connectionId:'local',profile:'worker'})},
+    profile:{get:()=> 'default'},connectionId:{get:()=> 'local'}},profileRoutes:async()=>[route]};
+  const ctx={storage:{get:()=>[],set:()=>{}},rest:async()=>{throw new Error('must not select');}};
+  await assert.rejects(()=>createRoutedStart(host,ctx,'hello'),/Focus the target profile/);
+});
+
+test('stock host shows requested route, then only claims a matching live binding', async () => {
+  const t=setup();t.controller.dispose();t.calls.length=0;t.updates.length=0;
+  const storage={get:()=>[{connectionId:'local',profile:'a',runtimeId:'runtime',storedSessionId:'durable',
+    status:'routed',model:'gpt-6-sol',provider:'openai-codex',reasoningEffort:'high'}]};
+  const c=createRouteController(t.host,value=>t.updates.push(value),{timeoutMs:50,storage});
+  await flush();t.calls[0].reject(new Error('missing'));await flush();t.calls[1].reject(new Error('missing'));await flush();
+  assert.match(t.updates.at(-1).label,/requested gpt-6-sol/);
+  c.observe({type:'session.info',session_id:'runtime',payload:{model:'gpt-6-sol',provider:'openai-codex',reasoning_effort_wire:'high'}});
+  await flush();
+  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-sol · high');
+  c.dispose();
 });
 test('focus change clears immediately and rejects late response even with identical IDs', async () => {
   const t=setup(); await flush(); t.calls[0].resolve(response()); await flush();
@@ -78,8 +156,8 @@ test('dispose removes subscriptions and ignores pending results', async () => {
 test('polls never overlap for the same identity, drafts cannot inherit a result', async () => {
   const t=setup(); await flush(); t.controller.refresh(); t.controller.refresh(); await flush();
   assert.equal(t.calls.length,1); t.state.focusedSessionId.set(null);
-  assert.equal(t.updates.at(-1).label,'Jev: new chat'); t.calls[0].resolve(response()); await flush();
-  assert.equal(t.updates.at(-1).label,'Jev: new chat'); t.controller.dispose();
+  assert.equal(t.updates.at(-1).label,'Jev: routed start ready'); t.calls[0].resolve(response()); await flush();
+  assert.equal(t.updates.at(-1).label,'Jev: routed start ready'); t.controller.dispose();
 });
 
 

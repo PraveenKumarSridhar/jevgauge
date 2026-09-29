@@ -2,10 +2,11 @@
 
 JevGauge is a user-scoped plugin. Its code, configuration, Desktop indicator, and compatibility checks live in this repository and are installed under the Hermes user home. The installer never edits a Hermes checkout or app bundle.
 
-Automatic first-call routing still needs Hermes to expose an early host-owned contract. JevGauge accepts two forms:
+JevGauge accepts three host integration levels:
 
 | Contract | Scope | Selection |
 |---|---|---|
+| Stock routed-session seam | Focused Desktop profile through **Start routed chat** | Model/provider and reasoning bound in `session.create` before agent construction |
 | Versioned native `turn_route` middleware plus `session.turn_route.read` | Addressed Desktop profiles | Host-validated model and reasoning binding |
 | Legacy `SESSION_RUNTIME_SELECTION_API = 1` development integration | Desktop launch profile | Model/provider and reasoning binding |
 
@@ -17,7 +18,7 @@ python -m jevgauge doctor --hermes-repo /path/to/hermes-agent
 
 `doctor` performs a static check. It does not change files, read credentials, contact a provider, or prove that a particular Desktop process is using the inspected checkout. Unsupported Hermes updates are rejected visibly.
 
-The native contract is the maintenance target. Its implementation is being developed as an extension of upstream [`turn_route` PR #98703](https://github.com/NousResearch/hermes-agent/pull/98703). It has not merged or shipped, so current unmodified Hermes releases must not be described as compatible unless `doctor` confirms the complete contract.
+The stock seam is the compatibility baseline. It uses normalized model and reasoning reads, retained addressed requests, profile-scoped plugin REST, explicit `session.create` overrides, `prompt.submit`, and session opening. The native contract is the automatic-composer enhancement. Its implementation is being developed as an extension of upstream [`turn_route` PR #98703](https://github.com/NousResearch/hermes-agent/pull/98703).
 
 ## Legacy development integration
 
@@ -62,7 +63,7 @@ Then follow the [JevGauge installation steps](../README.md#install), passing thi
 
 ## Contract boundaries
 
-The host must route before agent construction, resolve provider credentials itself, expose a profile-scoped plugin-secret reader, persist an allowlisted binding, restore it on resume, and expose an addressed read that does not activate another profile or build an agent. The plugin receives a public route and never receives provider credentials. It reads only its own TypeSafe token through `PluginContext.get_secret`.
+The stock host must expose its normalized model inventory and reasoning default, apply explicit session overrides before agent construction, persist them, and restore them on resume. The native contract additionally owns automatic interception, middleware validation, durable attribution, and an addressed read. Provider credentials remain host-owned. The plugin reads only its own TypeSafe token in the profile-scoped backend.
 
 The native contract records selection evidence only. It does not prove which physical provider served a request. Provider-attempt telemetry is optional and remains a separate legacy observer until Hermes exposes a supported generic execution boundary.
 
