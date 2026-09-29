@@ -31,8 +31,11 @@ function RouteIndicator({ctx}) {
         if(starting) return;
         setStarting(true);setActionStatus('Choosing a route before Hermes creates the session.');
         try {
-          await createRoutedStart(host,ctx,prompt);
-          setPrompt('');setActionStatus('Routed session created and prompt submitted.');controller?.refresh();
+          const result=await createRoutedStart(host,ctx,prompt);
+          setPrompt('');setActionStatus(result.submission==='unknown'
+            ? 'The routed session exists, but prompt acceptance is unknown. Inspect that session before sending again.'
+            : result.opened ? 'Routed session created and prompt submitted.'
+              : 'Routed session created and prompt submitted. Select it from the sidebar to open it.');controller?.refresh();
         } catch {
           setActionStatus('Routed start failed. Check the Hermes gateway log for the rejected step.');
         } finally {setStarting(false);}

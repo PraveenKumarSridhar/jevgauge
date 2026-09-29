@@ -14,6 +14,17 @@ _ROUTER_MODULE = None
 _MAX_MESSAGE_CHARS = 12_000
 
 
+def _profile_enabled(config: dict[str, Any]) -> bool:
+    plugins = config.get("plugins")
+    if not isinstance(plugins, dict):
+        return False
+    enabled = plugins.get("enabled")
+    disabled = plugins.get("disabled", [])
+    return (isinstance(enabled, list) and all(isinstance(item, str) for item in enabled)
+            and isinstance(disabled, list) and all(isinstance(item, str) for item in disabled)
+            and "jev-router" in enabled and "jev-router" not in disabled)
+
+
 class _ApiContext:
     def __init__(self, config: dict[str, Any]):
         self._config = config
@@ -82,6 +93,9 @@ def plan_route(body: dict[str, Any]) -> dict[str, Any]:
         from hermes_cli.config import load_config_readonly
 
         config = load_config_readonly() or {}
+        if not _profile_enabled(config):
+            return {"schema_version": "jevgauge.routed_start.v1", "status": "default",
+                    "reason": "plugin is disabled for this profile"}
         model = body.get("model")
         provider = body.get("provider")
         effort = body.get("reasoning_effort")

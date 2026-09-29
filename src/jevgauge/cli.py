@@ -268,6 +268,9 @@ def _read_config(home: Path, *, raw: bytes | None = None) -> dict:
     enabled = plugins.get('enabled', [])
     if not isinstance(enabled, list) or not all(isinstance(name, str) for name in enabled):
         raise InstallError('plugins.enabled must be a list of names.')
+    disabled = plugins.get('disabled', [])
+    if not isinstance(disabled, list) or not all(isinstance(name, str) for name in disabled):
+        raise InstallError('plugins.disabled must be a list of names.')
     entries = plugins.get('entries', {})
     if not isinstance(entries, dict):
         raise InstallError('plugins.entries must be a mapping.')
@@ -282,6 +285,9 @@ def _set_enabled(config: dict, enabled: bool) -> None:
     names = plugins.setdefault('enabled', [])
     names[:] = [name for name in names if name != PLUGIN]
     if enabled:
+        disabled = plugins.get('disabled')
+        if isinstance(disabled, list):
+            disabled[:] = [name for name in disabled if name != PLUGIN]
         names.append(PLUGIN)
     entry = plugins.setdefault('entries', {}).setdefault(PLUGIN, {})
     entry.setdefault('settings', {})['enabled'] = enabled
@@ -598,7 +604,9 @@ def operate(command: str, home: Path, repo: Path) -> None:
                         _write_owned(plugin, name, data)
                     # Keep timestamp-based Python caches from executing a previous
                     # same-size version installed within the same clock second.
-                    os.utime(plugin / '__init__.py', (source_mtime, source_mtime))
+                    for name in contents:
+                        if name.endswith('.py'):
+                            os.utime(_owned_path(plugin, name), (source_mtime, source_mtime))
                     ownership['state'] = 'installed'
                     _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
             else:
@@ -626,9 +634,10 @@ def operate(command: str, home: Path, repo: Path) -> None:
             ownership = _verify_owned(plugin, allow_uninstalled=True) if plugin.exists() else None
             _update_config(home, enabled=False, remove_installer_setting=True)
             if ownership is not None:
-                source = plugin / '__init__.py'
-                if source.exists():
-                    ownership['source_mtime'] = max(0, int(source.stat().st_mtime))
+                python_mtimes = [int(path.stat().st_mtime) for name in ownership['files']
+                                   if name.endswith('.py') and (path := _owned_path(plugin, name)).is_file()]
+                if python_mtimes:
+                    ownership['source_mtime'] = max(0, *python_mtimes)
                 ownership['state'] = 'uninstalled'
                 _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
                 for name in ownership['files']:

@@ -66,10 +66,21 @@ def test_install_enable_disable_uninstall_preserves_other_settings(installation)
     assert run(installation, 'disable') == 0
     assert config(home)['plugins']['enabled'] == ['other']
     assert run(installation, 'enable') == 0
+    assert 'disabled' not in config(home)['plugins'] or 'jev-router' not in config(home)['plugins']['disabled']
     assert run(installation, 'uninstall') == 0
     assert not (home / 'plugins/jev-router').exists()
     assert not (home / 'desktop-plugins/jev-router').exists()
     assert config(home) == {'model': 'original', 'secret': 'hidden', 'plugins': {'enabled': ['other'], 'entries': {'other': {'settings': {'x': 3}}}}}
+
+
+def test_enable_removes_only_jev_from_host_denylist(installation):
+    _, home = installation
+    home.mkdir()
+    (home / 'config.yaml').write_text('plugins:\n  enabled: [other]\n  disabled: [jev-router, keep-disabled]\n')
+    assert run(installation, 'install') == 0
+    saved = config(home)['plugins']
+    assert saved['enabled'] == ['other', 'jev-router']
+    assert saved['disabled'] == ['keep-disabled']
 
 
 def test_missing_hook_refuses_without_writing(installation, capsys):
@@ -488,6 +499,39 @@ def test_same_size_upgrade_does_not_execute_stale_cache(installation, monkeypatc
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.VALUE == 2
+
+
+def test_nested_python_upgrade_does_not_execute_stale_cache(installation, monkeypatch):
+    import importlib.util
+    import os
+    import py_compile
+    _, home = installation
+    files = cli._plugin_files()
+    files['dashboard/plugin_api.py'] = b"VALUE = 'old'\n"
+    monkeypatch.setattr(cli, '_plugin_files', lambda: files)
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    source = plugin / 'dashboard/plugin_api.py'
+    timestamp = 1_800_000_000
+    for name in files:
+        if name.endswith('.py'):
+            os.utime(plugin / name, (timestamp, timestamp))
+    py_compile.compile(str(source), doraise=True)
+    assert run(installation, 'uninstall') == 0
+    replacement = {**files, 'dashboard/plugin_api.py': b"VALUE = 'new'\n"}
+    monkeypatch.setattr(cli, '_plugin_files', lambda: replacement)
+    monkeypatch.setattr(cli.time, 'time', lambda: timestamp)
+    atomic_write = cli._atomic_write
+    def force_old_nested_mtime(path, data, *args, **kwargs):
+        atomic_write(path, data, *args, **kwargs)
+        if path == source:
+            os.utime(path, (timestamp, timestamp))
+    monkeypatch.setattr(cli, '_atomic_write', force_old_nested_mtime)
+    assert run(installation, 'install') == 0
+    spec = importlib.util.spec_from_file_location('nested_installer_cache_test', source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.VALUE == 'new'
 
 
 def test_partial_reinstall_can_be_retried(installation, monkeypatch):
