@@ -124,6 +124,13 @@ test('native user ownership is shown as manual and unrelated middleware is not c
   assert.equal(t.updates.at(-1).label,'Jev: unavailable'); t.controller.dispose();
 });
 
+test('native reasoning ownership is shown as manual independently of model ownership', async () => {
+  const t=setup(); await flush();
+  t.calls[0].resolve(response({reasoning_owner:'user'})); await flush();
+  assert.equal(t.updates.at(-1).label,'Jev: gpt-6-luna · low (manual)');
+  t.controller.dispose();
+});
+
 test('a corrupt routed model cannot be presented as a healthy default', async () => {
   const t=setup(); await flush(); t.calls[0].resolve(response({model:null})); await flush();
   assert.equal(t.updates.at(-1).label,'Jev: unavailable'); t.controller.dispose();
