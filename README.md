@@ -180,7 +180,7 @@ python -m pytest
 python -m build
 ```
 
-Tests run without Hermes installed and without provider credentials. HTTP boundaries use mock transports; the installer uses temporary homes. The separate integration workflow applies the public patch to a pinned clean Hermes checkout and runs lifecycle tests with Hermes's canonical test runner. [Verification details](docs/verification.md).
+Tests run without Hermes installed and without provider credentials. HTTP boundaries use mock transports; the installer uses temporary homes. CI labels the patch-based matrix as legacy integration and runs a separate lane against an exact native Hermes contract commit, including the packaged Jev registration path. [Verification details](docs/verification.md).
 
 We work in small commits: regression test → fix → independent adversarial review → commit. Found a bug? Include OS, Python version, Hermes commit, route status, and a redacted reproduction in an [issue](https://github.com/PraveenKumarSridhar/jevgauge/issues).
 

@@ -25,6 +25,7 @@ PLUGIN = 'jev-router'
 PLUGIN_FILES = ('__init__.py', 'plugin.yaml', 'telemetry.py', 'runtime.json')
 MANIFEST = '.jevgauge-install.json'
 DESKTOP_MANIFEST = '.jevgauge-desktop-install.json'
+LEGACY_DESKTOP_MANIFEST = '.jevgauge-ui-install.json'
 REQUIRED_SYMBOLS = {
     'hermes_cli/plugins.py': ('has_hook', 'invoke_hook', 'register_hook', 'register_middleware',
                               'register_command', 'get_config'),
@@ -228,6 +229,48 @@ def _write_config(home: Path, config: dict) -> None:
     _atomic_write(path, yaml.safe_dump(config, sort_keys=False).encode('utf-8'), mode)
 
 
+@contextmanager
+def _config_write_lock(home: Path):
+    """Share Hermes' plugin-settings lock without importing the host checkout."""
+    path = home / '.config.yaml.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a+b') as handle:
+        if os.name == 'nt':  # pragma: no cover - exercised on Windows CI
+            import msvcrt
+            if handle.seek(0, os.SEEK_END) == 0:
+                handle.write(b'\0')
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == 'nt':  # pragma: no cover - exercised on Windows CI
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _update_config(home: Path, *, enabled: bool, remove_installer_setting: bool = False) -> None:
+    """Merge Jev-owned fields into the latest config under the shared writer lock."""
+    with _config_write_lock(home):
+        config = _read_config(home)
+        _set_enabled(config, enabled)
+        if remove_installer_setting:
+            entries = config['plugins']['entries']
+            settings = entries[PLUGIN]['settings']
+            settings.pop('enabled', None)
+            if not settings:
+                entries[PLUGIN].pop('settings', None)
+            if not entries[PLUGIN]:
+                entries.pop(PLUGIN)
+        _write_config(home, config)
+
+
 def _verify_owned(plugin: Path, *, allow_uninstalled=False) -> dict:
     if not plugin.is_dir() or plugin.is_symlink():
         raise InstallError('Plugin is not an owned JevGauge directory. Existing directories and development symlinks must be migrated explicitly.')
@@ -268,18 +311,52 @@ def _desktop_plan(home: Path, content: bytes, *, uninstall: bool = False) -> str
     if not plugin.is_dir() or plugin.is_symlink():
         raise InstallError('Refusing an unmanaged Desktop plugin destination.')
     manifest = plugin / DESKTOP_MANIFEST
+    legacy_manifest = plugin / LEGACY_DESKTOP_MANIFEST
     source = plugin / 'plugin.js'
-    if source.is_symlink() or manifest.is_symlink():
+    if source.is_symlink() or manifest.is_symlink() or legacy_manifest.is_symlink():
         raise InstallError('Refusing a symlink in the Desktop plugin destination.')
     if manifest.exists():
         try:
             data = json.loads(manifest.read_text(encoding='utf-8'))
-            if (data != {'owner': 'jevgauge', 'format': 1, 'sha256': _hash(source.read_bytes())}
-                    or (not uninstall and source.read_bytes() != content)):
+            state = data.get('state', 'installed') if isinstance(data, dict) else None
+            expected_keys = ({'owner', 'format', 'sha256'}
+                             | ({'state'} if isinstance(data, dict) and 'state' in data else set()))
+            valid = (isinstance(data, dict) and set(data) == expected_keys
+                     and data.get('owner') == 'jevgauge' and data.get('format') == 1
+                     and state in ('installed', 'uninstalling')
+                     and isinstance(data.get('sha256'), str) and len(data['sha256']) == 64
+                     and all(char in '0123456789abcdef' for char in data['sha256']))
+            if not valid:
+                raise ValueError
+            if source.exists():
+                if not source.is_file() or _hash(source.read_bytes()) != data['sha256']:
+                    raise ValueError
+            elif state != 'uninstalling':
+                raise ValueError
+            if legacy_manifest.exists():
+                legacy = _read_legacy_desktop_manifest(
+                    legacy_manifest, source, allow_missing=state == 'uninstalling')
+                if legacy['sha256'] != data['sha256']:
+                    raise ValueError
+            if uninstall:
+                return 'owned-uninstalling' if state == 'uninstalling' else 'owned'
+            if state == 'uninstalling':
+                raise InstallError('Desktop plugin removal was interrupted. Run uninstall again before installing.')
+            if source.read_bytes() != content:
                 raise ValueError
         except (OSError, ValueError, UnicodeError):
             raise InstallError('Desktop plugin differs from the JevGauge package or ownership record. Preserve it before changing the installation.') from None
-        return 'owned'
+        return 'owned-legacy' if legacy_manifest.exists() else 'owned'
+    if legacy_manifest.exists():
+        try:
+            _read_legacy_desktop_manifest(legacy_manifest, source, allow_missing=uninstall)
+        except (OSError, ValueError, UnicodeError):
+            raise InstallError('Legacy Desktop plugin differs from its JevGauge ownership record. Preserve it before changing the installation.') from None
+        if uninstall:
+            return 'legacy-owned'
+        if not source.exists() or source.read_bytes() != content:
+            raise InstallError('Installed legacy Desktop plugin differs from this package. Uninstall it before installing the new version.')
+        return 'legacy-adopt'
     if uninstall:
         return 'unmanaged'
     # Adopt an exact manual copy from this package without replacing it.
@@ -288,20 +365,41 @@ def _desktop_plan(home: Path, content: bytes, *, uninstall: bool = False) -> str
     raise InstallError('Existing Desktop plugin is unmanaged or differs from this package. Preserve it before installing.')
 
 
+def _read_legacy_desktop_manifest(manifest: Path, source: Path, *, allow_missing: bool = False) -> dict:
+    data = json.loads(manifest.read_text(encoding='utf-8'))
+    valid = (isinstance(data, dict) and set(data) == {'owner', 'source', 'sha256'}
+             and data.get('owner') == 'jevgauge' and isinstance(data.get('source'), str)
+             and bool(data['source']) and isinstance(data.get('sha256'), str)
+             and len(data['sha256']) == 64
+             and all(char in '0123456789abcdef' for char in data['sha256']))
+    if not valid:
+        raise ValueError
+    if source.exists():
+        if not source.is_file() or _hash(source.read_bytes()) != data['sha256']:
+            raise ValueError
+    elif not allow_missing:
+        raise ValueError
+    return data
+
+
 def _install_desktop(home: Path, content: bytes, plan: str) -> None:
     plugin = home / 'desktop-plugins' / PLUGIN
     if plan == 'owned':
         return
-    if plan == 'adopt':
+    if plan in ('adopt', 'legacy-adopt', 'owned-legacy'):
         _atomic_write(plugin / DESKTOP_MANIFEST,
-                      json.dumps({'owner': 'jevgauge', 'format': 1, 'sha256': _hash(content)}).encode('utf-8'))
+                      json.dumps({'owner': 'jevgauge', 'format': 1, 'sha256': _hash(content),
+                                  'state': 'installed'}).encode('utf-8'))
+        if plan in ('legacy-adopt', 'owned-legacy'):
+            (plugin / LEGACY_DESKTOP_MANIFEST).unlink(missing_ok=True)
         return
     plugin.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix='.jevgauge-desktop-', dir=plugin.parent))
     try:
         (temporary / 'plugin.js').write_bytes(content)
         (temporary / DESKTOP_MANIFEST).write_text(
-            json.dumps({'owner': 'jevgauge', 'format': 1, 'sha256': _hash(content)}), encoding='utf-8')
+            json.dumps({'owner': 'jevgauge', 'format': 1, 'sha256': _hash(content),
+                        'state': 'installed'}), encoding='utf-8')
         temporary.rename(plugin)
     finally:
         if temporary.exists():
@@ -311,11 +409,23 @@ def _install_desktop(home: Path, content: bytes, plan: str) -> None:
 
 
 def _uninstall_desktop(home: Path, plan: str) -> None:
-    if plan != 'owned':
+    if plan not in ('owned', 'owned-uninstalling', 'legacy-owned'):
         return
     plugin = home / 'desktop-plugins' / PLUGIN
-    (plugin / 'plugin.js').unlink()
-    (plugin / DESKTOP_MANIFEST).unlink()
+    source = plugin / 'plugin.js'
+    manifest = plugin / DESKTOP_MANIFEST
+    legacy_manifest = plugin / LEGACY_DESKTOP_MANIFEST
+    if plan == 'legacy-owned':
+        digest = _read_legacy_desktop_manifest(legacy_manifest, source, allow_missing=True)['sha256']
+    else:
+        data = json.loads(manifest.read_text(encoding='utf-8'))
+        digest = data['sha256']
+    _atomic_write(manifest, json.dumps({
+        'owner': 'jevgauge', 'format': 1, 'sha256': digest, 'state': 'uninstalling',
+    }).encode('utf-8'))
+    source.unlink(missing_ok=True)
+    legacy_manifest.unlink(missing_ok=True)
+    manifest.unlink(missing_ok=True)
     if not any(plugin.iterdir()):
         plugin.rmdir()
 
@@ -346,7 +456,7 @@ def operate(command: str, home: Path, repo: Path) -> None:
         return
     with _lock(home):
         _check_paths(home)
-        config = _read_config(home)
+        _read_config(home)
         plugin = home / 'plugins' / PLUGIN
         desktop_bytes = _desktop_plugin_bytes() if command in ('install', 'uninstall') else b''
         desktop_plan = (_desktop_plan(home, desktop_bytes, uninstall=command == 'uninstall')
@@ -392,38 +502,28 @@ def operate(command: str, home: Path, repo: Path) -> None:
                             path.unlink()
                         temporary.rmdir()
             _install_desktop(home, desktop_bytes, desktop_plan)
-            _set_enabled(config, True)
-            _write_config(home, config)
+            _update_config(home, enabled=True)
         elif command == 'enable':
             _verify_owned(plugin)
-            _set_enabled(config, True)
-            _write_config(home, config)
+            _update_config(home, enabled=True)
         elif command == 'disable':
-            _set_enabled(config, False)
-            _write_config(home, config)
+            _update_config(home, enabled=False)
         elif command == 'uninstall':
-            ownership = _verify_owned(plugin, allow_uninstalled=True)
-            _set_enabled(config, False)
-            # Preserve user settings for a later reinstall, except installer-owned enable.
-            settings = config['plugins']['entries'][PLUGIN]['settings']
-            settings.pop('enabled', None)
-            if not settings:
-                config['plugins']['entries'][PLUGIN].pop('settings', None)
-            if not config['plugins']['entries'][PLUGIN]:
-                config['plugins']['entries'].pop(PLUGIN)
-            _write_config(home, config)
-            source = plugin / '__init__.py'
-            if source.exists():
-                ownership['source_mtime'] = max(0, int(source.stat().st_mtime))
-            ownership['state'] = 'uninstalled'
-            _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
-            for name in ownership['files']:
-                (plugin / name).unlink(missing_ok=True)
-            if any(path.name != MANIFEST for path in plugin.iterdir()):
-                print('Owned plugin files removed; user files and caches preserved with an ownership record for reinstall.')
-            else:
-                (plugin / MANIFEST).unlink()
-                plugin.rmdir()
+            ownership = _verify_owned(plugin, allow_uninstalled=True) if plugin.exists() else None
+            _update_config(home, enabled=False, remove_installer_setting=True)
+            if ownership is not None:
+                source = plugin / '__init__.py'
+                if source.exists():
+                    ownership['source_mtime'] = max(0, int(source.stat().st_mtime))
+                ownership['state'] = 'uninstalled'
+                _atomic_write(plugin / MANIFEST, json.dumps(ownership).encode('utf-8'))
+                for name in ownership['files']:
+                    (plugin / name).unlink(missing_ok=True)
+                if any(path.name != MANIFEST for path in plugin.iterdir()):
+                    print('Owned plugin files removed; user files and caches preserved with an ownership record for reinstall.')
+                else:
+                    (plugin / MANIFEST).unlink()
+                    plugin.rmdir()
             _uninstall_desktop(home, desktop_plan)
         print(f'{command.capitalize()} complete. Restart Hermes Desktop to apply changes.')
 

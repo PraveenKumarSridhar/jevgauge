@@ -10,13 +10,13 @@ Use `python -m jevgauge --help` for arguments. Every command accepts `--home`; d
 | disable | Disable future decisions; works without a compatible checkout |
 | uninstall | Disable, remove unchanged owned backend and Desktop files; preserve other settings/files |
 
-Close Desktop and other processes editing Hermes config before mutations. A lock serializes JevGauge installers, not other applications. YAML comments/formatting normalize; unrelated values are retained. Config writes are atomic. An interrupted install may leave a disabled managed copy that can be safely installed again. Never remove a stale lock until you confirm no installer is running.
+Close Desktop and other processes editing Hermes config before mutations. The installer rereads the current config immediately before its field-scoped change and shares Hermes's cross-process plugin-settings lock. Some host configuration writers use a different process-local lock, so closing them is still required. YAML comments/formatting normalize; unrelated values are retained. Config writes are atomic. An interrupted install may leave a disabled managed copy that can be safely installed again. Never remove a stale lock until you confirm no installer is running.
 
 When cache or user files remain after uninstall, a small ownership record remains with them. Reinstall uses that record to restore only the managed files. Modified managed files are still refused. Python caches are preserved; the restored source timestamp changes so a same-size upgrade cannot execute stale bytecode.
 
 Existing plugin symlinks or unmanaged directories are refused. For development symlinks, keep the symlink and configure the plugin manually, or back it up and move it aside before managed installation. There is intentionally no force-overwrite flag.
 
-The native indicator is installed in `<home>/desktop-plugins/jev-router/plugin.js`. Enable **Jev routing** separately in Desktop Capabilities → Plugins. An exact manually installed copy is adopted without replacement; a different or edited copy is refused. The installer accepts either the native `turn_route` plus `session.turn_route.read` contract or the pinned legacy runtime-selection contract. It refuses unsupported hosts before writing either plugin.
+The native indicator is installed in `<home>/desktop-plugins/jev-router/plugin.js`. Enable **Jev routing** separately in Desktop Capabilities → Plugins. An exact manually installed copy is adopted without replacement; a different or edited copy is refused. Legacy JevGauge ownership manifests can be removed and upgraded without touching unknown files. Desktop removal writes an owned tombstone before deleting code, so an interrupted uninstall can be retried. The installer accepts either the native `turn_route` plus `session.turn_route.read` contract or the pinned legacy runtime-selection contract. It refuses unsupported hosts before writing either plugin.
 
 ## Clean wheel smoke
 

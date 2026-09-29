@@ -149,7 +149,19 @@ def test_generic_turn_route_ignores_ineligible_turns(overrides):
     assert router.turn_route(**args) is None
 
 
-def test_registers_native_middleware_and_legacy_hooks():
+def test_registers_native_middleware_and_legacy_hooks(monkeypatch):
+    parent = ModuleType("hermes_cli")
+    plugins = ModuleType("hermes_cli.plugins")
+    plugins.VALID_HOOKS = {"select_session_runtime", "provider_attempt"}
+    middleware = ModuleType("hermes_cli.middleware")
+    middleware.TURN_ROUTE_API_VERSION = 1
+    middleware.VALID_MIDDLEWARE = {"turn_route"}
+    parent.plugins = plugins
+    parent.middleware = middleware
+    monkeypatch.setitem(sys.modules, "hermes_cli", parent)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    monkeypatch.setitem(sys.modules, "hermes_cli.middleware", middleware)
+
     class RegistrationContext(Config):
         def __init__(self):
             super().__init__()
@@ -176,9 +188,14 @@ def test_native_only_host_does_not_register_unknown_legacy_hooks(monkeypatch):
     parent = ModuleType("hermes_cli")
     plugins = ModuleType("hermes_cli.plugins")
     plugins.VALID_HOOKS = {"pre_llm_call"}
+    middleware = ModuleType("hermes_cli.middleware")
+    middleware.TURN_ROUTE_API_VERSION = 1
+    middleware.VALID_MIDDLEWARE = {"turn_route"}
     parent.plugins = plugins
+    parent.middleware = middleware
     monkeypatch.setitem(sys.modules, "hermes_cli", parent)
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    monkeypatch.setitem(sys.modules, "hermes_cli.middleware", middleware)
 
     class NativeContext(Config):
         def __init__(self):
@@ -199,6 +216,41 @@ def test_native_only_host_does_not_register_unknown_legacy_hooks(monkeypatch):
     router.register(ctx)
     assert [name for name, _ in ctx.middleware] == ["turn_route"]
     assert ctx.hooks == []
+
+
+def test_unsupported_native_api_version_does_not_register_middleware(monkeypatch):
+    parent = ModuleType("hermes_cli")
+    plugins = ModuleType("hermes_cli.plugins")
+    plugins.VALID_HOOKS = set()
+    middleware = ModuleType("hermes_cli.middleware")
+    middleware.TURN_ROUTE_API_VERSION = 2
+    middleware.VALID_MIDDLEWARE = {"turn_route"}
+    parent.plugins = plugins
+    parent.middleware = middleware
+    monkeypatch.setitem(sys.modules, "hermes_cli", parent)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    monkeypatch.setitem(sys.modules, "hermes_cli.middleware", middleware)
+
+    class FutureContext(Config):
+        def __init__(self):
+            super().__init__()
+            self.middleware = []
+            self.hooks = []
+
+        def register_middleware(self, name, callback):
+            self.middleware.append((name, callback))
+
+        def register_hook(self, name, callback):
+            self.hooks.append((name, callback))
+
+        def register_command(self, *_args, **_kwargs):
+            return None
+
+    ctx = FutureContext()
+    router.register(ctx)
+    assert ctx.middleware == []
+    assert ctx.hooks == []
+    assert router.runtime_health(ctx)["routing"]["status"] == "unavailable"
 
 
 def test_native_secret_uses_public_plugin_context():

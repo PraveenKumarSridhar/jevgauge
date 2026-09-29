@@ -108,6 +108,50 @@ def test_matching_manual_desktop_plugin_is_adopted_without_replacement(installat
     assert not source.exists()
 
 
+def test_legacy_desktop_install_can_be_removed_then_upgraded(installation, monkeypatch):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    desktop = home / 'desktop-plugins/jev-router'
+    source = desktop / 'plugin.js'
+    (desktop / cli.DESKTOP_MANIFEST).unlink()
+    (desktop / cli.LEGACY_DESKTOP_MANIFEST).write_text(json.dumps({
+        'owner': 'jevgauge',
+        'source': '/old/package/jev-router/desktop/plugin.js',
+        'sha256': cli._hash(source.read_bytes()),
+    }))
+
+    assert run(installation, 'uninstall') == 0
+    assert not desktop.exists()
+
+    monkeypatch.setattr(cli, '_desktop_plugin_bytes', lambda: b'// upgraded native plugin\n')
+    assert run(installation, 'install') == 0
+    assert source.read_bytes() == b'// upgraded native plugin\n'
+    assert (desktop / cli.DESKTOP_MANIFEST).is_file()
+    assert not (desktop / cli.LEGACY_DESKTOP_MANIFEST).exists()
+
+
+def test_interrupted_desktop_uninstall_is_retryable(installation, monkeypatch):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    desktop = home / 'desktop-plugins/jev-router'
+    manifest = desktop / cli.DESKTOP_MANIFEST
+    original = Path.unlink
+
+    def fail_manifest_once(path, *args, **kwargs):
+        if path == manifest and not (desktop / 'plugin.js').exists():
+            raise PermissionError('simulated interruption after plugin removal')
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'unlink', fail_manifest_once)
+        assert run(installation, 'uninstall') == 1
+
+    assert not (desktop / 'plugin.js').exists()
+    assert manifest.exists()
+    assert run(installation, 'uninstall') == 0
+    assert not desktop.exists()
+
+
 def test_modified_desktop_plugin_refuses_before_install_changes(installation):
     _, home = installation
     plugin = home / 'desktop-plugins/jev-router'
@@ -286,7 +330,24 @@ def test_config_replace_failure_preserves_original(installation, monkeypatch):
     assert run(installation, 'install') == 1
     assert (home / 'config.yaml').read_text() == text
     assert not (home / '.jevgauge-install.lock').exists()
-    assert not list(home.glob('.config.yaml.*'))
+    assert [path.name for path in home.glob('.config.yaml.*')] == ['.config.yaml.lock']
+
+
+def test_install_merges_an_unrelated_config_write_during_package_work(installation, monkeypatch):
+    _, home = installation
+    home.mkdir()
+    path = home / 'config.yaml'
+    path.write_text('model: initial\nplugins:\n  enabled: [other]\n')
+    install_desktop = cli._install_desktop
+
+    def concurrent_write(*args, **kwargs):
+        path.write_text('model: concurrent-user-choice\nplugins:\n  enabled: [other]\n')
+        return install_desktop(*args, **kwargs)
+
+    monkeypatch.setattr(cli, '_install_desktop', concurrent_write)
+    assert run(installation, 'install') == 0
+    assert config(home)['model'] == 'concurrent-user-choice'
+    assert config(home)['plugins']['enabled'] == ['other', 'jev-router']
 
 
 def test_live_lock_refuses_without_changes(installation):

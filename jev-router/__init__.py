@@ -391,7 +391,17 @@ def turn_route(*, ctx, route: dict, user_message: str, source: str,
 
 def register(ctx) -> None:
     register_middleware = getattr(ctx, "register_middleware", None)
-    if callable(register_middleware):
+    try:
+        from hermes_cli.middleware import TURN_ROUTE_API_VERSION, VALID_MIDDLEWARE
+        native_supported = (
+            type(TURN_ROUTE_API_VERSION) is int
+            and TURN_ROUTE_API_VERSION == 1
+            and isinstance(VALID_MIDDLEWARE, (set, frozenset, list, tuple))
+            and "turn_route" in VALID_MIDDLEWARE
+        )
+    except (ImportError, AttributeError, TypeError):
+        native_supported = False
+    if callable(register_middleware) and native_supported:
         register_middleware("turn_route", lambda **kwargs: turn_route(ctx=ctx, **kwargs))
     # Keep legacy integrations available without registering unknown hooks on a
     # native-only host.

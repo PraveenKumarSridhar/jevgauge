@@ -120,7 +120,7 @@ jobs:
           PYCONFIG
 
   native-routing:
-    name: Native routing / ${{ matrix.name }}
+    name: Legacy integration / ${{ matrix.name }}
     needs: compatibility-config
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -172,3 +172,37 @@ jobs:
               print(receipt.read_text())
               print(receipt.with_name('check.log').read_text())
           PYREPORT
+
+  native-contract:
+    name: Native contract / pinned Hermes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: jevgauge
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: PraveenKumarSridhar/hermes-agent-docs-fix
+          ref: 29ff3ed40bba992f0eb3b898126c6d3e84a9fcee
+          path: hermes
+      - name: Prepare pinned Hermes test environment
+        id: environment
+        working-directory: hermes
+        run: |
+          source ./activate --
+          printf 'python=%s\n' "$__HERMES_TEST_PYTHON" >> "$GITHUB_OUTPUT"
+      - name: Verify native host lifecycle
+        working-directory: hermes
+        run: >-
+          scripts/run_tests.sh -j 3 --file-retries 0
+          tests/tui_gateway/test_turn_route_session_binding.py
+          tests/tui_gateway/test_model_switch_reasoning_flag.py
+          tests/tui_gateway/contracts/test_generated.py
+      - name: Load the packaged Jev plugin against the native host
+        working-directory: jevgauge
+        env:
+          HERMES_REPO: ${{ github.workspace }}/hermes
+        run: >-
+          ${{ steps.environment.outputs.python }} -m pytest -q
+          integration/tests/test_native_contract_plugin.py
