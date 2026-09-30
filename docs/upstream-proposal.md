@@ -1,39 +1,78 @@
-# Proposed Hermes integration
+# Upstream Hermes route contract
 
-Suggested PR title: **Add early, durable Desktop session runtime selection for plugins**
+Status: implementation in an isolated worktree, based on current Hermes `main` and stacked on open upstream `turn_route` PR [#98703](https://github.com/NousResearch/hermes-agent/pull/98703). It has not been submitted, accepted, merged, or released.
 
-This is a PR preparation document, not a claim that a PR is open or accepted. The patch is based on the exact revision in integration/base.json.
+## Why this belongs in Hermes
 
-## Problem
+A user plugin can own routing policy, configuration, and UI. It cannot safely choose the first model before Desktop constructs an agent unless Hermes exposes a host-owned extension point. Hermes must also keep provider credentials private, expose a profile-scoped plugin-secret reader, persist the chosen binding, restore it on resume, and provide a side-effect-free read for the Desktop indicator.
 
-A plugin cannot safely select model and reasoning via request middleware after provider/agent construction. Desktop also builds agents before the first prompt and needs a persisted binding that survives cold resume. User-owned fields must remain authoritative.
+```mermaid
+flowchart LR
+    A[First external prompt] --> B[Generic turn_route middleware]
+    B --> C[Hermes resolves credentials and runtime]
+    C --> D[Persist allowlisted session binding]
+    D --> E[Build agent and run turn]
+    D --> F[Addressed session.turn_route.read]
+```
 
-## Proposed contract
+JevGauge consumes this contract from its own repository. It does not install or patch the contract into Hermes.
 
-`select_session_runtime` receives first-message text, session key, source, current provider/model/reasoning, separate user-ownership flags, and optional `report_status(metadata)` callback. A selector returns a session-scoped directive with optional model/provider/reasoning effort plus metadata. Core validates it, enforces manual ownership, saves the effective pair, and constructs the agent afterward.
+## Upstream overlap checked 2026-09-28
 
-The proposed `SESSION_RUNTIME_SELECTION_API = 1` marker identifies this local contract. It is not registered as an upstream API today. The optional status callback uses existing session.info metadata. Core UI is generic; a plugin can supply a display label.
+| Open proposal | Reusable boundary | Remaining gap |
+|---|---|---|
+| [#98703, pre-agent `turn_route`](https://github.com/NousResearch/hermes-agent/pull/98703), head `9eaa6dd8` at inspection | Public routing before agent construction; credentials stay host-owned | Desktop `tui_gateway` lifecycle, bounded reasoning selection, durable first-conversation binding, cold resume, and addressed read |
+| [#118985, reasoning-effort policy](https://github.com/NousResearch/hermes-agent/pull/118985), head `8e38508f` at inspection | Host-bounded effort vocabulary and persistence | Separate from model routing and not merged at inspection |
+| [#99053, `pre_llm_call` model override](https://github.com/NousResearch/hermes-agent/pull/99053), head `1e9c0bda` at inspection | Model override for an imminent call | Runs too late for a durable Desktop session binding |
+| [#119031, Jev adaptive effort catalog entry](https://github.com/NousResearch/hermes-agent/pull/119031), head `90629d8f` at inspection | Jev effort policy | Effort only; does not select a model |
 
-## Scope and isolation
+The implementation extends #98703 instead of creating a competing route mechanism. Reasoning effort and provider-attempt evidence remain separate follow-up contracts.
 
-- Desktop gateway launch profile only. Sibling profiles are intentionally skipped until profile-specific plugin discovery/secret access are designed and tested.
-- No Jev references in host selection logic. No provider credentials sent to the selector's external endpoint by Hermes core.
-- No automatic rerouting later in the conversation.
-- First-response rejection fallback is one-shot and ends as soon as usable output or a tool effect exists.
-- Explicit model and reasoning changes update the persisted effective state, including deferred resumed sessions.
+## Contract implemented in the isolated branch
 
-## Tests and evidence
+### First-turn lifecycle
 
-The patch includes first-prompt ordering, concurrent/one-time selection, durable restore, manual effort through model changes, invalid selection, and provisional rejection tests. Desktop tests cover event hydration, manual labels, fallback display, and minimized-state persistence.
+- Route only the first external user prompt.
+- Run after prompt admission and before any agent construction.
+- Serialize concurrent first submissions under the existing build lock.
+- Skip internal hosted turns, tool continuation, seeded history, and explicit user model choices.
+- Fail open to the original public route when middleware abstains, raises, or returns an invalid route.
+- Resolve credentials only after middleware returns, inside the owning profile scope.
 
-The actual local Desktop path has produced a provider-confirmed `openai-codex` / `gpt-6-luna` / `low` first call and resumed call. This is macOS evidence; other OS live-provider support remains unverified. See verification.md.
+### Durable binding
 
-## Maintainer decisions before upstream submission
+Hermes writes an allowlisted `hermes.turn_route.binding.v1` value into the session row before building the agent. It contains status, model and reasoning ownership, public model/provider fields, a bounded reasoning effort, middleware manifest names, and an optional machine-readable reason code. It excludes API keys, base URLs, prompt text, plugin explanations, arbitrary metadata, and raw callback output.
 
-1. Final hook name and versioning, and whether callback metadata needs a typed shape.
-2. Whether generic routing display belongs in core or a supported Desktop extension slot.
-3. Timeout/worker ownership for arbitrary plugins beyond JevGauge's own bounded selection.
-4. Profile-specific plugin dispatch, which this preview deliberately does not implement.
-5. Whether first-request rejection handling should integrate further with the existing provider failover API.
+Cold resume restores the committed runtime and binding without rerunning middleware. Explicit model changes move ownership to the user.
 
-The patch is a testable initial proposal. It should be reviewed as a generic capability, independently of JevGauge's tier policy.
+### Addressed read
+
+`session.turn_route.read` requires both runtime and durable session IDs. An optional profile must match the live session without activating another profile. The read uses live memory only and does not query the database, build an agent, wait for the build lock, change attachments, or expose credentials.
+
+The result is selection evidence. It does not prove a physical provider attempt, response, fallback, token count, or billed model.
+
+### Failure behavior
+
+- A binding persistence failure rejects the admitted submission and releases its running, inflight, and active-turn state.
+- Agent-dependent RPCs fail promptly while the initial route is pending.
+- Attachments can still mutate the session without triggering early construction.
+- Operational authentication fallback stays host-side and is not persisted as the selected route.
+
+## JevGauge migration
+
+The repo-owned plugin now has a stock **Start routed chat** path that reads the host's public model inventory and reasoning default, asks Jev, and passes the selected values to `session.create` before submitting the prompt. It registers native `turn_route` middleware when the host exposes `TURN_ROUTE_API_VERSION = 1` and retains `select_session_runtime` as a legacy fallback. The stock and native paths do not depend on private account-catalog or credential helpers. The Desktop indicator reads `session.turn_route.read` first, then the legacy `session.runtime_selection` RPC, then plugin-owned routed-start attribution.
+
+The installer accepts the complete stock seam, native contract, or legacy contract and rejects partial marker-only hosts. Provider-attempt telemetry is optional, so missing dashboard evidence does not disable model routing.
+
+## Compatibility promise
+
+A Hermes update is compatible only when the complete contract and lifecycle tests pass. User-scoped plugin files surviving an app replacement do not prove that the new host can execute them. `jevgauge doctor` is the static gate, followed by fresh-chat and cold-resume checks against the exact candidate.
+
+Until the admission gate merges and appears in a Hermes release, JevGauge cannot promise that an official updater will reject every future incompatible host before activation. The explicit routed-start path works on stock releases where `doctor` detects the baseline seam. The legacy patch remains a development fallback in a disposable checkout.
+
+## Later work
+
+- Compose reasoning effort through a supported host capability contract.
+- Add generic provider-attempt evidence across transports, retries, fallbacks, and terminal failures.
+- Define host deadlines and resource isolation for slow middleware callbacks.
+- Rebase the extension after #98703 changes or merges, then submit it without duplicating the upstream implementation.

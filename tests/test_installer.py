@@ -1,27 +1,47 @@
-from pathlib import Path
 import json
+from pathlib import Path
+
 import pytest
 import yaml
+
 from jevgauge import cli
 
 
 @pytest.fixture
 def installation(tmp_path, monkeypatch):
     repo = tmp_path / 'Hermes checkout'
-    for relative, names in cli.REQUIRED_SYMBOLS.items():
+    requirements = {**cli.REQUIRED_SYMBOLS, **cli.LEGACY_REQUIRED_SYMBOLS}
+    for relative, names in requirements.items():
         path = repo / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('\n'.join(f'def {name}(): pass' for name in names))
     plugins = repo / 'hermes_cli/plugins.py'
-    plugins.write_text(plugins.read_text() + '\nSESSION_RUNTIME_SELECTION_API = 1\nPROVIDER_ATTEMPT_API = 1\n')
+    plugins.write_text(plugins.read_text() + '\ndef get_secret(): pass\nPROVIDER_ATTEMPT_API = 1\n')
+    middleware = repo / 'hermes_cli/middleware.py'
+    middleware.write_text('TURN_ROUTE_MIDDLEWARE = "turn_route"\nTURN_ROUTE_API_VERSION = 1\nVALID_MIDDLEWARE = {TURN_ROUTE_MIDDLEWARE}\ndef apply_turn_route_middleware(): pass\n')
+    resolver = repo / 'hermes_cli/turn_routing.py'
+    resolver.write_text('def resolve_turn_route(): pass\n')
+    read_api = repo / 'tui_gateway/methods_turn_route.py'
+    read_api.parent.mkdir(parents=True, exist_ok=True)
+    read_api.write_text('@method("session.turn_route.read")\ndef read(): pass\n')
     home = tmp_path / 'User home'
     source = tmp_path / 'source'
     source.mkdir()
-    (source / '__init__.py').write_text('# router\n')
-    (source / 'plugin.yaml').write_text('name: jev-router\n')
-    (source / 'telemetry.py').write_text('# telemetry fixture\n')
-    (source / 'runtime.json').write_text('{}')
+    fixture_files = {
+        '__init__.py': '# router\n', 'plugin.yaml': 'name: jev-router\n',
+        'telemetry.py': '# telemetry fixture\n', 'runtime.json': '{}',
+        'dashboard/__init__.py': '',
+        'dashboard/manifest.json': '{"api":"plugin_api.py"}',
+        'dashboard/plugin_api.py': '# route API\n',
+        'dashboard/dist/__init__.py': '',
+        'dashboard/dist/index.js': '// backend only\n',
+    }
+    for name, content in fixture_files.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
     monkeypatch.setattr(cli, '_plugin_files', lambda: {name: (source / name).read_bytes() for name in cli.PLUGIN_FILES})
+    monkeypatch.setattr(cli, '_desktop_plugin_bytes', lambda: b'// native Jev test plugin\n')
     return repo, home
 
 
@@ -35,31 +55,214 @@ def config(home):
 
 
 def test_install_enable_disable_uninstall_preserves_other_settings(installation):
-    repo, home = installation
+    _repo, home = installation
     home.mkdir()
     (home / 'config.yaml').write_text('model: original\nsecret: hidden\nplugins:\n  enabled: [other]\n  entries:\n    other:\n      settings: {x: 3}\n')
     assert run(installation, 'install') == 0
     assert run(installation, 'install') == 0
     assert config(home)['plugins']['enabled'] == ['other', 'jev-router']
+    assert config(home)['plugins']['entries']['jev-router']['update_admission'] == 'required'
+    assert (home / 'desktop-plugins/jev-router/plugin.js').read_bytes() == b'// native Jev test plugin\n'
     assert run(installation, 'disable') == 0
     assert config(home)['plugins']['enabled'] == ['other']
     assert run(installation, 'enable') == 0
+    assert 'disabled' not in config(home)['plugins'] or 'jev-router' not in config(home)['plugins']['disabled']
     assert run(installation, 'uninstall') == 0
     assert not (home / 'plugins/jev-router').exists()
+    assert not (home / 'desktop-plugins/jev-router').exists()
     assert config(home) == {'model': 'original', 'secret': 'hidden', 'plugins': {'enabled': ['other'], 'entries': {'other': {'settings': {'x': 3}}}}}
+
+
+def test_enable_removes_only_jev_from_host_denylist(installation):
+    _, home = installation
+    home.mkdir()
+    (home / 'config.yaml').write_text('plugins:\n  enabled: [other]\n  disabled: [jev-router, keep-disabled]\n')
+    assert run(installation, 'install') == 0
+    saved = config(home)['plugins']
+    assert saved['enabled'] == ['other', 'jev-router']
+    assert saved['disabled'] == ['keep-disabled']
 
 
 def test_missing_hook_refuses_without_writing(installation, capsys):
     repo, home = installation
-    path = repo / 'hermes_cli/plugins.py'
-    path.write_text(path.read_text().replace('SESSION_RUNTIME_SELECTION_API = 1', '# SESSION_RUNTIME_SELECTION_API = 1'))
+    (repo / 'hermes_cli/middleware.py').write_text('VALID_MIDDLEWARE = set()\n')
+    (repo / 'hermes_cli/turn_routing.py').unlink()
+    (repo / 'tui_gateway/methods_turn_route.py').unlink()
     assert run(installation, 'install') == 1
     assert not home.exists()
-    assert 'upstream' in capsys.readouterr().err
+    assert 'routed session' in capsys.readouterr().err
 
 
-def test_missing_dependency_refuses(installation):
+def test_stock_routed_start_contract_is_compatible(tmp_path):
+    repo = tmp_path / 'stock-hermes'
+    for relative, names in cli.REQUIRED_SYMBOLS.items():
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('\n'.join(f'def {name}(): pass' for name in names))
+    contracts = repo / 'tui_gateway/contracts/sessions.py'
+    contracts.parent.mkdir(parents=True, exist_ok=True)
+    contracts.write_text('''
+class SessionCreateParams:
+    model: str | None = None
+    provider: str | None = None
+    reasoning_effort: str | None = None
+method("session.create", params=SessionCreateParams)
+''')
+    prompt = repo / 'tui_gateway/contracts/prompt_voice.py'
+    prompt.write_text('method("prompt.submit")\n')
+    config_models = repo / 'tui_gateway/contracts/config_free_tier_control.py'
+    config_models.write_text('method("model.options")\nmethod("config.get")\n')
+    methods = repo / 'tui_gateway/methods_session.py'
+    methods.write_text('''
+def _create_overrides(params): pass
+def _create_session(rid, params):
+    model_override = params.get("model")
+    reasoning_override = params.get("reasoning_effort")
+    _schedule_agent_build("sid")
+''')
+    sdk = repo / 'apps/desktop/src/sdk/index.ts'
+    sdk.parent.mkdir(parents=True, exist_ok=True)
+    sdk.write_text('profileRoutes requestProfile retainProfile openSession')
+    plugin_sdk = repo / 'apps/desktop/src/contrib/plugin.ts'
+    plugin_sdk.parent.mkdir(parents=True, exist_ok=True)
+    plugin_sdk.write_text('interface PluginContext { rest: unknown }')
+    dashboard = repo / 'hermes_cli/web_server_dashboard.py'
+    dashboard.write_text('def _plugin_route_secret_scope(): pass\ndef _mount_plugin_api_routes(): pass\n')
+    (repo / 'agent').mkdir(exist_ok=True)
+    (repo / 'agent/secret_scope.py').write_text('def get_secret(name): pass\n')
+    (repo / 'hermes_cli/config.py').write_text('def load_config_readonly(): return {}\n')
+    assert cli.check_compatibility(repo) == 'routed_start'
+
+
+def test_native_contract_does_not_require_legacy_private_catalog_helpers(installation):
+    repo, _ = installation
+    for relative in cli.LEGACY_REQUIRED_SYMBOLS:
+        (repo / relative).unlink()
+    assert run(installation, 'doctor') == 0
+
+
+def test_native_contract_requires_public_profile_secret_reader(installation):
     repo, home = installation
+    plugins = repo / 'hermes_cli/plugins.py'
+    plugins.write_text(plugins.read_text().replace('def get_secret(): pass\n', ''))
+    assert run(installation, 'doctor') == 1
+    assert not home.exists()
+
+
+def test_native_contract_requires_versioned_reasoning_binding(installation):
+    repo, home = installation
+    middleware = repo / 'hermes_cli/middleware.py'
+    middleware.write_text(middleware.read_text().replace('TURN_ROUTE_API_VERSION = 1\n', ''))
+    assert run(installation, 'doctor') == 1
+    assert not home.exists()
+
+
+def test_matching_manual_desktop_plugin_is_adopted_without_replacement(installation):
+    _, home = installation
+    plugin = home / 'desktop-plugins/jev-router'
+    plugin.mkdir(parents=True)
+    source = plugin / 'plugin.js'
+    source.write_bytes(b'// native Jev test plugin\n')
+    assert run(installation, 'install') == 0
+    assert source.read_bytes() == b'// native Jev test plugin\n'
+    assert (plugin / cli.DESKTOP_MANIFEST).is_file()
+    (plugin / 'user-notes.txt').write_text('keep')
+    assert run(installation, 'uninstall') == 0
+    assert (plugin / 'user-notes.txt').read_text() == 'keep'
+    assert not source.exists()
+
+
+def test_legacy_desktop_install_can_be_removed_then_upgraded(installation, monkeypatch):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    desktop = home / 'desktop-plugins/jev-router'
+    source = desktop / 'plugin.js'
+    (desktop / cli.DESKTOP_MANIFEST).unlink()
+    (desktop / cli.LEGACY_DESKTOP_MANIFEST).write_text(json.dumps({
+        'owner': 'jevgauge',
+        'source': '/old/package/jev-router/desktop/plugin.js',
+        'sha256': cli._hash(source.read_bytes()),
+    }))
+
+    assert run(installation, 'uninstall') == 0
+    assert not desktop.exists()
+
+    monkeypatch.setattr(cli, '_desktop_plugin_bytes', lambda: b'// upgraded native plugin\n')
+    assert run(installation, 'install') == 0
+    assert source.read_bytes() == b'// upgraded native plugin\n'
+    assert (desktop / cli.DESKTOP_MANIFEST).is_file()
+    assert not (desktop / cli.LEGACY_DESKTOP_MANIFEST).exists()
+
+
+def test_interrupted_desktop_uninstall_is_retryable(installation, monkeypatch):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    desktop = home / 'desktop-plugins/jev-router'
+    manifest = desktop / cli.DESKTOP_MANIFEST
+    original = Path.unlink
+
+    def fail_manifest_once(path, *args, **kwargs):
+        if path == manifest and not (desktop / 'plugin.js').exists():
+            raise PermissionError('simulated interruption after plugin removal')
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, 'unlink', fail_manifest_once)
+        assert run(installation, 'uninstall') == 1
+
+    assert not (desktop / 'plugin.js').exists()
+    assert manifest.exists()
+    assert run(installation, 'uninstall') == 0
+    assert not desktop.exists()
+
+
+def test_modified_desktop_plugin_refuses_before_install_changes(installation):
+    _, home = installation
+    plugin = home / 'desktop-plugins/jev-router'
+    plugin.mkdir(parents=True)
+    (plugin / 'plugin.js').write_text('custom code')
+    assert run(installation, 'install') == 1
+    assert (plugin / 'plugin.js').read_text() == 'custom code'
+    assert not (home / 'plugins/jev-router').exists()
+    assert not (home / 'config.yaml').exists()
+
+
+def test_non_directory_desktop_root_refuses_before_install_changes(installation):
+    _, home = installation
+    home.mkdir()
+    (home / 'desktop-plugins').write_text('keep')
+    assert run(installation, 'install') == 1
+    assert (home / 'desktop-plugins').read_text() == 'keep'
+    assert not (home / 'plugins/jev-router').exists()
+    assert not (home / 'config.yaml').exists()
+
+
+def test_modified_managed_desktop_plugin_refuses_uninstall(installation):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    source = home / 'desktop-plugins/jev-router/plugin.js'
+    source.write_text('custom code')
+    assert run(installation, 'uninstall') == 1
+    assert source.read_text() == 'custom code'
+    assert (home / 'plugins/jev-router/__init__.py').exists()
+
+
+def test_unmanaged_desktop_plugin_survives_uninstall(installation):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'desktop-plugins/jev-router'
+    (plugin / cli.DESKTOP_MANIFEST).unlink()
+    assert run(installation, 'uninstall') == 0
+    assert (plugin / 'plugin.js').exists()
+
+
+def test_legacy_contract_missing_dependency_refuses(installation):
+    repo, home = installation
+    (repo / 'hermes_cli/middleware.py').unlink()
+    (repo / 'hermes_cli/turn_routing.py').unlink()
+    (repo / 'tui_gateway/methods_turn_route.py').unlink()
+    plugins = repo / 'hermes_cli/plugins.py'
+    plugins.write_text(plugins.read_text() + '\nSESSION_RUNTIME_SELECTION_API = 1\n')
     (repo / 'agent/reasoning_effort.py').write_text('')
     assert run(installation, 'doctor') == 1
     assert not home.exists()
@@ -191,7 +394,24 @@ def test_config_replace_failure_preserves_original(installation, monkeypatch):
     assert run(installation, 'install') == 1
     assert (home / 'config.yaml').read_text() == text
     assert not (home / '.jevgauge-install.lock').exists()
-    assert not list(home.glob('.config.yaml.*'))
+    assert [path.name for path in home.glob('.config.yaml.*')] == ['.config.yaml.lock']
+
+
+def test_install_merges_an_unrelated_config_write_during_package_work(installation, monkeypatch):
+    _, home = installation
+    home.mkdir()
+    path = home / 'config.yaml'
+    path.write_text('model: initial\nplugins:\n  enabled: [other]\n')
+    install_desktop = cli._install_desktop
+
+    def concurrent_write(*args, **kwargs):
+        path.write_text('model: concurrent-user-choice\nplugins:\n  enabled: [other]\n')
+        return install_desktop(*args, **kwargs)
+
+    monkeypatch.setattr(cli, '_install_desktop', concurrent_write)
+    assert run(installation, 'install') == 0
+    assert config(home)['model'] == 'concurrent-user-choice'
+    assert config(home)['plugins']['enabled'] == ['other', 'jev-router']
 
 
 def test_live_lock_refuses_without_changes(installation):
@@ -262,8 +482,8 @@ def test_partial_uninstall_can_be_retried(installation, monkeypatch):
 
 def test_same_size_upgrade_does_not_execute_stale_cache(installation, monkeypatch):
     import importlib.util
-    import py_compile
     import os
+    import py_compile
     _, home = installation
     monkeypatch.setattr(cli, '_plugin_files', lambda: {'__init__.py': b'VALUE = 1\n', 'plugin.yaml': b'name: jev-router\n', 'telemetry.py': b'', 'runtime.json': b'{}'})
     assert run(installation, 'install') == 0
@@ -279,6 +499,39 @@ def test_same_size_upgrade_does_not_execute_stale_cache(installation, monkeypatc
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.VALUE == 2
+
+
+def test_nested_python_upgrade_does_not_execute_stale_cache(installation, monkeypatch):
+    import importlib.util
+    import os
+    import py_compile
+    _, home = installation
+    files = cli._plugin_files()
+    files['dashboard/plugin_api.py'] = b"VALUE = 'old'\n"
+    monkeypatch.setattr(cli, '_plugin_files', lambda: files)
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    source = plugin / 'dashboard/plugin_api.py'
+    timestamp = 1_800_000_000
+    for name in files:
+        if name.endswith('.py'):
+            os.utime(plugin / name, (timestamp, timestamp))
+    py_compile.compile(str(source), doraise=True)
+    assert run(installation, 'uninstall') == 0
+    replacement = {**files, 'dashboard/plugin_api.py': b"VALUE = 'new'\n"}
+    monkeypatch.setattr(cli, '_plugin_files', lambda: replacement)
+    monkeypatch.setattr(cli.time, 'time', lambda: timestamp)
+    atomic_write = cli._atomic_write
+    def force_old_nested_mtime(path, data, *args, **kwargs):
+        atomic_write(path, data, *args, **kwargs)
+        if path == source:
+            os.utime(path, (timestamp, timestamp))
+    monkeypatch.setattr(cli, '_atomic_write', force_old_nested_mtime)
+    assert run(installation, 'install') == 0
+    spec = importlib.util.spec_from_file_location('nested_installer_cache_test', source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.VALUE == 'new'
 
 
 def test_partial_reinstall_can_be_retried(installation, monkeypatch):
@@ -321,10 +574,29 @@ def test_distributable_plugin_has_standalone_telemetry_and_dashboard_runtime():
     assert 'telemetry.py' in files
     assert b'class EventStore' in files['telemetry.py']
     assert json.loads(files['runtime.json']) == {'python': sys.executable}
+    assert set(files) == set(cli.PLUGIN_FILES)
+    assert b'"api": "plugin_api.py"' in files['dashboard/manifest.json']
+
+
+def test_distributable_plugin_declares_resilient_baseline_host_contract():
+    manifest = yaml.safe_load(cli._plugin_files()['plugin.yaml'])
+    assert manifest['requires_host_contracts'] == {'desktop.plugin_routed_session': 1}
+
+
+def test_nested_dashboard_files_are_owned_and_removed(installation):
+    _, home = installation
+    assert run(installation, 'install') == 0
+    plugin = home / 'plugins/jev-router'
+    assert (plugin / 'dashboard/manifest.json').is_file()
+    assert (plugin / 'dashboard/plugin_api.py').is_file()
+    (plugin / 'dashboard/user-note.txt').write_text('keep')
+    assert run(installation, 'uninstall') == 0
+    assert (plugin / 'dashboard/user-note.txt').read_text() == 'keep'
+    assert not (plugin / 'dashboard/manifest.json').exists()
 
 
 def test_dashboard_cli_dispatches_without_installing(tmp_path, monkeypatch):
-    import jevgauge.dashboard as dashboard
+    from jevgauge import dashboard
     observed = []
     monkeypatch.setattr(dashboard, 'serve', lambda home, **kwargs: observed.append((home, kwargs)))
     assert cli.main(['dashboard', '--home', str(tmp_path), '--demo', '--port', '8766', '--open']) == 0
@@ -338,9 +610,11 @@ def test_legacy_plugin_can_be_uninstalled_before_dashboard_upgrade(installation)
     plugin = home / 'plugins/jev-router'
     manifest_path = plugin / cli.MANIFEST
     manifest = json.loads(manifest_path.read_text())
-    for name in ('telemetry.py', 'runtime.json'):
+    for name in set(cli.PLUGIN_FILES) - {'__init__.py', 'plugin.yaml'}:
         (plugin / name).unlink()
         del manifest['files'][name]
+    (plugin / 'dashboard/dist').rmdir()
+    (plugin / 'dashboard').rmdir()
     manifest_path.write_text(json.dumps(manifest))
     assert run(installation, 'uninstall') == 0
     assert not plugin.exists()
@@ -352,7 +626,7 @@ def test_legacy_upgrade_preserves_unowned_new_filenames(installation):
     plugin = home / 'plugins/jev-router'
     manifest_path = plugin / cli.MANIFEST
     manifest = json.loads(manifest_path.read_text())
-    for name in ('telemetry.py', 'runtime.json'):
+    for name in set(cli.PLUGIN_FILES) - {'__init__.py', 'plugin.yaml'}:
         del manifest['files'][name]
     manifest_path.write_text(json.dumps(manifest))
     (plugin / 'telemetry.py').write_text('# user-owned unrelated file')
@@ -362,10 +636,20 @@ def test_legacy_upgrade_preserves_unowned_new_filenames(installation):
     assert (plugin / 'telemetry.py').read_text() == '# user-owned unrelated file'
 
 
-def test_dashboard_install_refuses_host_without_physical_attempt_hook(installation, capsys):
+def test_missing_optional_physical_attempt_hook_does_not_block_routing_install(installation, capsys):
     repo, home = installation
     path = repo / 'hermes_cli/plugins.py'
     path.write_text(path.read_text().replace('PROVIDER_ATTEMPT_API = 1', '# PROVIDER_ATTEMPT_API = 1'))
-    assert run(installation, 'install') == 1
-    assert not home.exists()
-    assert 'PROVIDER_ATTEMPT_API' in capsys.readouterr().err
+    assert run(installation, 'install') == 0
+    assert (home / 'plugins/jev-router/__init__.py').exists()
+    assert 'PROVIDER_ATTEMPT_API' not in capsys.readouterr().err
+
+
+def test_legacy_patched_host_remains_compatible(installation):
+    repo, _ = installation
+    (repo / 'hermes_cli/middleware.py').unlink()
+    (repo / 'hermes_cli/turn_routing.py').unlink()
+    (repo / 'tui_gateway/methods_turn_route.py').unlink()
+    plugins = repo / 'hermes_cli/plugins.py'
+    plugins.write_text(plugins.read_text() + '\nSESSION_RUNTIME_SELECTION_API = 1\n')
+    assert run(installation, 'doctor') == 0

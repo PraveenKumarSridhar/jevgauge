@@ -14,7 +14,7 @@ def test_route_through_storage_and_http_has_hand_calculated_estimates(tmp_path, 
     router = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(router)
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
-    monkeypatch.setattr(router, '_get_secret', lambda: 'FAKE_SECRET_DO_NOT_RETAIN')
+    monkeypatch.setattr(router, '_get_secret', lambda *_args: 'FAKE_SECRET_DO_NOT_RETAIN')
     monkeypatch.setattr(router, '_live_models', lambda: ['gpt-4.1-nano', 'gpt-4.1-mini', 'gpt-4.1'])
     monkeypatch.setattr(router, '_supported_efforts', lambda *args: ['low'])
     monkeypatch.setattr(router, '_decide', lambda *args: {'answers': {'model_tier': {'choice': 'balanced', 'confidence': .9}, 'effort_tier': {'choice': 'low', 'confidence': .9}}})

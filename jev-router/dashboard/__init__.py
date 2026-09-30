@@ -1,0 +1,1 @@
+"""Jev dashboard extension resources."""

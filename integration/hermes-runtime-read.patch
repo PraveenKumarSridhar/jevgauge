@@ -1,0 +1,391 @@
+--- a/tui_gateway/methods_session.py
++++ b/tui_gateway/methods_session.py
+@@ -2392,3 +2392,42 @@
+ def register(server) -> None:
+     """Publish this module's helpers onto ``server`` (rebound to its globals) and install handlers."""
+     bind_module(globals(), server, skip=("_",))
++
++
++@method("session.runtime_selection")
++def _runtime_selection_read(rid, params: dict) -> dict:
++    # Validate before _sess_nowait: direct calls must also fail closed on non-string IDs.
++    sid, stored = params.get("session_id"), params.get("stored_session_id")
++    if not isinstance(sid, str) or not sid.strip() or not isinstance(stored, str) or not stored.strip():
++        return _err(rid, 4000, "runtime and stored session IDs are required")
++    session, err = _sess_nowait(params, rid)
++    if err:
++        return err
++    if session.get("session_key") != stored:
++        return _err(rid, 4001, "session identity mismatch")
++    # No _sess/build, DB lookup, profile config, lock wait, or transport attachment.
++    from hermes_cli import plugins
++    def capability(marker, hook):
++        version = getattr(plugins, marker, None)
++        return version if type(version) is int and hook in plugins.VALID_HOOKS else None
++    supported = not bool(session.get("profile_home"))
++    raw = session.get("session_route") if supported else None
++    route = dict(raw) if isinstance(raw, dict) else {}
++    owners = route.get("owner")
++    owners = dict(owners) if isinstance(owners, dict) else {}
++    def text(value):
++        return value if isinstance(value, str) and len(value) <= 256 and not any(ord(c) < 32 for c in value) else None
++    status = route.get("status")
++    if status not in ("selecting", "routed", "unrouted/default"):
++        status = "unrecorded"
++    return _ok(rid, {
++        "schema_version": 1, "session_id": sid, "stored_session_id": stored,
++        "evidence": "session_binding", "scope_supported": supported,
++        "selection_api": capability("SESSION_RUNTIME_SELECTION_API", "select_session_runtime"),
++        "telemetry_api": capability("PROVIDER_ATTEMPT_API", "provider_attempt"),
++        "status": status if supported else "unsupported",
++        "model": text(route.get("model")), "provider": text(route.get("provider")),
++        "reasoning_effort": text(route.get("reasoning_effort")),
++        "owner": {key: owners.get(key) if owners.get(key) in ("router", "user") else "default"
++                  for key in ("model", "reasoning")},
++    })
+--- a/tui_gateway/contracts/sessions.py
++++ b/tui_gateway/contracts/sessions.py
+@@ -731,3 +731,31 @@
+ 
+ method("llm.oneshot", params=LlmOneshotParams, result=LlmOneshotResult,
+        doc="Stateless one-shot LLM completion (titles, ideas) on the session's or the task backend.")
++
++
++class RuntimeSelectionReadParams(SessionParams):
++    stored_session_id: str = Field(min_length=1)
++
++
++class RuntimeSelectionOwner(Result):
++    model: str
++    reasoning: str
++
++
++class RuntimeSelectionReadResult(Result):
++    schema_version: int
++    session_id: str
++    stored_session_id: str
++    evidence: str
++    selection_api: int | None
++    telemetry_api: int | None
++    scope_supported: bool
++    status: str
++    model: str | None
++    provider: str | None
++    reasoning_effort: str | None
++    owner: RuntimeSelectionOwner
++
++
++method("session.runtime_selection", params=RuntimeSelectionReadParams, result=RuntimeSelectionReadResult,
++       doc="Read a live session binding without constructing an agent or rebinding its transport.")
+--- a/apps/shared/src/gateway-contract.generated.ts
++++ b/apps/shared/src/gateway-contract.generated.ts
+@@ -3341,6 +3341,29 @@
+ }
+ export interface LlmOneshotResult {
+   text: string
++}
++export interface RuntimeSelectionReadParams {
++  session_id: string
++  profile?: string | null
++  stored_session_id: string
++}
++export interface RuntimeSelectionReadResult {
++  schema_version: number
++  session_id: string
++  stored_session_id: string
++  evidence: string
++  selection_api: number | null
++  telemetry_api: number | null
++  scope_supported: boolean
++  status: string
++  model: string | null
++  provider: string | null
++  reasoning_effort: string | null
++  owner: RuntimeSelectionOwner
++}
++export interface RuntimeSelectionOwner {
++  model: string
++  reasoning: string
+ }
+ export interface SystemBatteryParams {
+   profile?: string | null
+@@ -5048,6 +5071,8 @@
+   'session.redirect': { params: SessionCorrectionParams; result: SessionCorrectionResult }
+   /** Attach to a stored session: reuse it if live here, else lazy / deferred / cold / eager rebuild. */
+   'session.resume': { params: SessionResumeParams; result: SessionResumeResult }
++  /** Read a live session binding without constructing an agent or rebinding its transport. */
++  'session.runtime_selection': { params: RuntimeSelectionReadParams; result: RuntimeSelectionReadResult }
+   /** Export the transcript to ~/.hermes/sessions/saved (classic /save). */
+   'session.save': { params: SessionSaveParams; result: SessionSaveResult }
+   /** Set/clear hidden (out of the default list, still resumable by its owner) on a session + lineage. */
+@@ -5338,6 +5363,7 @@
+   'session.most_recent',
+   'session.redirect',
+   'session.resume',
++  'session.runtime_selection',
+   'session.save',
+   'session.set_hidden',
+   'session.status',
+--- a/apps/shared/src/gateway-contract.openrpc.json
++++ b/apps/shared/src/gateway-contract.openrpc.json
+@@ -3373,6 +3373,24 @@
+       }
+     },
+     {
++      "name": "session.runtime_selection",
++      "summary": "Read a live session binding without constructing an agent or rebinding its transport.",
++      "params": [
++        {
++          "name": "params",
++          "schema": {
++            "$ref": "#/components/schemas/RuntimeSelectionReadParams"
++          }
++        }
++      ],
++      "result": {
++        "name": "result",
++        "schema": {
++          "$ref": "#/components/schemas/RuntimeSelectionReadResult"
++        }
++      }
++    },
++    {
+       "name": "session.save",
+       "summary": "Export the transcript to ~/.hermes/sessions/saved (classic /save).",
+       "params": [
+@@ -27205,6 +27223,160 @@
+           "idempotent"
+         ],
+         "title": "RoomTombstone",
++        "type": "object"
++      },
++      "RuntimeSelectionOwner": {
++        "additionalProperties": false,
++        "properties": {
++          "model": {
++            "title": "Model",
++            "type": "string"
++          },
++          "reasoning": {
++            "title": "Reasoning",
++            "type": "string"
++          }
++        },
++        "required": [
++          "model",
++          "reasoning"
++        ],
++        "title": "RuntimeSelectionOwner",
++        "type": "object"
++      },
++      "RuntimeSelectionReadParams": {
++        "additionalProperties": false,
++        "properties": {
++          "session_id": {
++            "title": "Session Id",
++            "type": "string"
++          },
++          "profile": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "default": null,
++            "title": "Profile"
++          },
++          "stored_session_id": {
++            "minLength": 1,
++            "title": "Stored Session Id",
++            "type": "string"
++          }
++        },
++        "required": [
++          "session_id",
++          "stored_session_id"
++        ],
++        "title": "RuntimeSelectionReadParams",
++        "type": "object"
++      },
++      "RuntimeSelectionReadResult": {
++        "additionalProperties": false,
++        "properties": {
++          "schema_version": {
++            "title": "Schema Version",
++            "type": "integer"
++          },
++          "session_id": {
++            "title": "Session Id",
++            "type": "string"
++          },
++          "stored_session_id": {
++            "title": "Stored Session Id",
++            "type": "string"
++          },
++          "evidence": {
++            "title": "Evidence",
++            "type": "string"
++          },
++          "selection_api": {
++            "anyOf": [
++              {
++                "type": "integer"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "title": "Selection Api"
++          },
++          "telemetry_api": {
++            "anyOf": [
++              {
++                "type": "integer"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "title": "Telemetry Api"
++          },
++          "scope_supported": {
++            "title": "Scope Supported",
++            "type": "boolean"
++          },
++          "status": {
++            "title": "Status",
++            "type": "string"
++          },
++          "model": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "title": "Model"
++          },
++          "provider": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "title": "Provider"
++          },
++          "reasoning_effort": {
++            "anyOf": [
++              {
++                "type": "string"
++              },
++              {
++                "type": "null"
++              }
++            ],
++            "title": "Reasoning Effort"
++          },
++          "owner": {
++            "$ref": "#/components/schemas/RuntimeSelectionOwner"
++          }
++        },
++        "required": [
++          "schema_version",
++          "session_id",
++          "stored_session_id",
++          "evidence",
++          "selection_api",
++          "telemetry_api",
++          "scope_supported",
++          "status",
++          "model",
++          "provider",
++          "reasoning_effort",
++          "owner"
++        ],
++        "title": "RuntimeSelectionReadResult",
+         "type": "object"
+       },
+       "SecretRequestParams": {
+--- /dev/null
++++ b/tests/tui_gateway/test_runtime_selection_read.py
+@@ -0,0 +1,72 @@
++"""Read-only selection snapshots for standalone Desktop extensions."""
++import copy
++import pytest
++from tui_gateway import server
++
++
++def read(params):
++    return server._methods['session.runtime_selection'](1, params)
++
++
++@pytest.fixture
++def session(monkeypatch):
++    value = {'session_key':'durable', 'agent':None, 'session_route':{
++        'status':'routed', 'model':'gpt-6-luna', 'provider':'openai-codex',
++        'reasoning_effort':'low', 'owner':{'model':'router','reasoning':'router'},
++        'reason':'PRIVATE TOKEN', 'original_runtime':{'api_key':'PRIVATE TOKEN'}}}
++    monkeypatch.setitem(server._sessions,'runtime',value)
++    def forbidden(*args, **kwargs):
++        pytest.fail('read must not construct agents or access storage')
++    monkeypatch.setattr(server,'_start_agent_build',forbidden)
++    monkeypatch.setattr(server,'_session_db',forbidden)
++    yield value
++    monkeypatch.undo()
++
++
++def test_read_has_detached_allowlisted_binding_and_no_side_effects(session):
++    before=copy.deepcopy(session)
++    result=read({'session_id':'runtime','stored_session_id':'durable'})['result']
++    assert result['evidence']=='session_binding'
++    assert result['model']=='gpt-6-luna'
++    assert result['selection_api']==1
++    assert session==before
++    assert 'PRIVATE' not in str(result)
++    session['session_route']['owner']['model']='user'
++    assert result['owner']['model']=='router'
++
++
++@pytest.mark.parametrize('params', [
++    {}, {'session_id':'runtime'}, {'session_id':'runtime','stored_session_id':''},
++    {'session_id':'runtime','stored_session_id':'wrong'},
++    {'session_id':'stale','stored_session_id':'durable'},
++    {'session_id':['runtime'],'stored_session_id':'durable'},
++    {'session_id':'runtime','stored_session_id':5},
++])
++def test_rejects_missing_malformed_or_mismatched_identity(session,params):
++    assert 'error' in read(params)
++
++
++def test_sibling_scope_returns_no_route(session):
++    session['profile_home']='/disposable/sibling'
++    result=read({'session_id':'runtime','stored_session_id':'durable'})['result']
++    assert result['scope_supported'] is False
++    assert result['status']=='unsupported'
++    assert result['model'] is None
++    assert result['owner']=={'model':'default','reasoning':'default'}
++
++
++@pytest.mark.parametrize('status,owner', [('selecting','router'),('routed','user'),('unrouted/default','default')])
++def test_selecting_manual_and_fallback_are_visible_without_build_lock(session,status,owner):
++    import threading
++    session['agent_build_lock']=threading.Lock()
++    session['agent_build_lock'].acquire()
++    session['session_route']['status']=status
++    session['session_route']['owner']['model']=owner
++    result=read({'session_id':'runtime','stored_session_id':'durable'})['result']
++    assert result['status']==status
++    assert result['owner']['model']==owner
++
++
++def test_missing_record_is_unrecorded(session):
++    session.pop('session_route')
++    assert read({'session_id':'runtime','stored_session_id':'durable'})['result']['status']=='unrecorded'

@@ -1,5 +1,7 @@
 import importlib.util
 from pathlib import Path
+import sys
+from types import ModuleType
 
 import pytest
 import yaml
@@ -10,12 +12,37 @@ spec = importlib.util.spec_from_file_location("jev_router_poc", PLUGIN)
 router = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(router)
 REAL_DECIDE = router._decide
+REAL_GET_SECRET = router._get_secret
+
+
+class FakeHTTPResponse:
+    def __init__(self, content, *, status=200, url="https://example.com"):
+        self.content = content
+        self.status = status
+        self.url = url
+        self.offset = 0
+
+    def geturl(self):
+        return self.url
+
+    def getcode(self):
+        return self.status
+
+    def read(self, size):
+        chunk = self.content[self.offset:self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+    def close(self):
+        pass
 
 
 def test_manifest_declares_persistent_effort_mode():
     manifest = yaml.safe_load((PLUGIN.parent / "plugin.yaml").read_text())
     assert manifest["config_schema"]["effort_mode"]["type"] == "str"
     assert manifest["config_schema"]["effort_mode"]["default"] == "auto"
+    assert "python_dependencies" not in manifest
+    assert "import httpx" not in PLUGIN.read_text(encoding="utf-8")
 
 
 class Config:
@@ -37,7 +64,7 @@ def call(**overrides):
 
 @pytest.fixture(autouse=True)
 def setup(monkeypatch):
-    monkeypatch.setattr(router, "_get_secret", lambda: "test-key")
+    monkeypatch.setattr(router, "_get_secret", lambda *_args: "test-key")
     monkeypatch.setattr(router, "_supported_efforts", lambda provider, model: ("none", "low", "medium", "high"))
     monkeypatch.setattr(router, "_live_models", lambda: ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"])
     monkeypatch.setattr(router, "_decide", lambda *a: {
@@ -55,6 +82,209 @@ def test_model_and_effort_are_independent():
     assert result["metadata"]["owner"] == {"model": "router", "reasoning": "router"}
 
 
+def test_generic_turn_route_selects_public_model_and_reasoning(monkeypatch):
+    original = {
+        "model": "gpt-6-sol",
+        "provider": "openai-codex",
+        "requested_provider": "openai-codex",
+        "current_reasoning_effort": "medium",
+        "runtime": {"provider": "openai-codex", "requested_provider": "openai-codex", "api_mode": "responses"},
+    }
+    before = dict(original, runtime=dict(original["runtime"]))
+    monkeypatch.setattr(router, "_supported_efforts", lambda *_: pytest.fail("the host validates native choices"))
+    monkeypatch.setattr(router, "_live_models", lambda: pytest.fail("generic routing must not import the private account catalog"))
+
+    result = router.turn_route(
+        ctx=Config(), route=original, original_redacted_route=before,
+        user_message="Solve the complex task", source="desktop",
+        session_id="runtime", session_key="durable", is_first_turn=True,
+        internal=False, tool_continuation=False,
+    )
+
+    assert original == before
+    assert result["route"] == {
+        **before,
+        "model": "gpt-6-luna",
+        "reasoning_effort": "high",
+        "requested_provider": "openai-codex",
+        "runtime": {**before["runtime"], "requested_provider": "openai-codex"},
+    }
+    assert result["source"] == "jevgauge"
+    assert result["reason"] == "economical"
+    assert result["status"] == "routed"
+
+
+def test_generic_turn_route_reports_bounded_default_after_abstention(monkeypatch):
+    monkeypatch.setattr(router, "_get_secret", lambda *_args: None)
+    original = {
+        "model": "gpt-6-sol",
+        "provider": "openai-codex",
+        "requested_provider": "openai-codex",
+        "current_reasoning_effort": "medium",
+        "runtime": {"provider": "openai-codex", "requested_provider": "openai-codex"},
+    }
+
+    result = router.turn_route(
+        ctx=Config(), route=original, user_message="task", source="desktop",
+        session_key="durable", is_first_turn=True, internal=False, tool_continuation=False,
+    )
+
+    assert result["route"] == original
+    assert result["status"] == "default"
+    assert result["reason"] == "missing_Jev_credential"
+
+
+def test_generic_turn_route_manual_mode_preserves_host_reasoning():
+    original = {
+        "model": "gpt-6-sol",
+        "provider": "openai-codex",
+        "requested_provider": "openai-codex",
+        "current_reasoning_effort": "medium",
+        "runtime": {"provider": "openai-codex", "requested_provider": "openai-codex"},
+    }
+
+    result = router.turn_route(
+        ctx=Config(effort_mode="manual"), route=original,
+        user_message="task", source="desktop", session_key="durable",
+        is_first_turn=True, internal=False, tool_continuation=False,
+    )
+
+    assert result["route"]["model"] == "gpt-6-luna"
+    assert result["route"]["preserve_reasoning"] is True
+    assert "reasoning_effort" not in result["route"]
+
+
+@pytest.mark.parametrize("overrides", [
+    {"source": "cli"},
+    {"internal": True},
+    {"tool_continuation": True},
+    {"is_first_turn": False},
+    {"ctx": Config(enabled=False)},
+])
+def test_generic_turn_route_ignores_ineligible_turns(overrides):
+    args = dict(
+        ctx=Config(),
+        route={"model": "gpt-6-sol", "provider": "openai-codex", "requested_provider": "openai-codex"},
+        user_message="task", source="desktop", session_key="durable",
+        is_first_turn=True, internal=False, tool_continuation=False,
+    )
+    args.update(overrides)
+    assert router.turn_route(**args) is None
+
+
+def test_registers_native_middleware_and_legacy_hooks(monkeypatch):
+    parent = ModuleType("hermes_cli")
+    plugins = ModuleType("hermes_cli.plugins")
+    plugins.VALID_HOOKS = {"select_session_runtime", "provider_attempt"}
+    middleware = ModuleType("hermes_cli.middleware")
+    middleware.TURN_ROUTE_API_VERSION = 1
+    middleware.VALID_MIDDLEWARE = {"turn_route"}
+    parent.plugins = plugins
+    parent.middleware = middleware
+    monkeypatch.setitem(sys.modules, "hermes_cli", parent)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    monkeypatch.setitem(sys.modules, "hermes_cli.middleware", middleware)
+
+    class RegistrationContext(Config):
+        def __init__(self):
+            super().__init__()
+            self.middleware = []
+            self.hooks = []
+            self.commands = []
+
+        def register_middleware(self, name, callback):
+            self.middleware.append((name, callback))
+
+        def register_hook(self, name, callback):
+            self.hooks.append((name, callback))
+
+        def register_command(self, name, callback, **_kwargs):
+            self.commands.append((name, callback))
+
+    ctx = RegistrationContext()
+    router.register(ctx)
+    assert [name for name, _ in ctx.middleware] == ["turn_route"]
+    assert [name for name, _ in ctx.hooks] == ["select_session_runtime", "provider_attempt"]
+
+
+def test_native_only_host_does_not_register_unknown_legacy_hooks(monkeypatch):
+    parent = ModuleType("hermes_cli")
+    plugins = ModuleType("hermes_cli.plugins")
+    plugins.VALID_HOOKS = {"pre_llm_call"}
+    middleware = ModuleType("hermes_cli.middleware")
+    middleware.TURN_ROUTE_API_VERSION = 1
+    middleware.VALID_MIDDLEWARE = {"turn_route"}
+    parent.plugins = plugins
+    parent.middleware = middleware
+    monkeypatch.setitem(sys.modules, "hermes_cli", parent)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    monkeypatch.setitem(sys.modules, "hermes_cli.middleware", middleware)
+
+    class NativeContext(Config):
+        def __init__(self):
+            super().__init__()
+            self.middleware = []
+            self.hooks = []
+
+        def register_middleware(self, name, callback):
+            self.middleware.append((name, callback))
+
+        def register_hook(self, name, callback):
+            self.hooks.append((name, callback))
+
+        def register_command(self, *_args, **_kwargs):
+            return None
+
+    ctx = NativeContext()
+    router.register(ctx)
+    assert [name for name, _ in ctx.middleware] == ["turn_route"]
+    assert ctx.hooks == []
+
+
+def test_unsupported_native_api_version_does_not_register_middleware(monkeypatch):
+    parent = ModuleType("hermes_cli")
+    plugins = ModuleType("hermes_cli.plugins")
+    plugins.VALID_HOOKS = set()
+    middleware = ModuleType("hermes_cli.middleware")
+    middleware.TURN_ROUTE_API_VERSION = 2
+    middleware.VALID_MIDDLEWARE = {"turn_route"}
+    parent.plugins = plugins
+    parent.middleware = middleware
+    monkeypatch.setitem(sys.modules, "hermes_cli", parent)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", plugins)
+    monkeypatch.setitem(sys.modules, "hermes_cli.middleware", middleware)
+
+    class FutureContext(Config):
+        def __init__(self):
+            super().__init__()
+            self.middleware = []
+            self.hooks = []
+
+        def register_middleware(self, name, callback):
+            self.middleware.append((name, callback))
+
+        def register_hook(self, name, callback):
+            self.hooks.append((name, callback))
+
+        def register_command(self, *_args, **_kwargs):
+            return None
+
+    ctx = FutureContext()
+    router.register(ctx)
+    assert ctx.middleware == []
+    assert ctx.hooks == []
+    assert router.runtime_health(ctx)["routing"]["status"] == "unavailable"
+
+
+def test_native_secret_uses_public_plugin_context():
+    class SecretContext:
+        def get_secret(self, name):
+            assert name == "TYPESAFE_API_KEY"
+            return "context-secret"
+
+    assert REAL_GET_SECRET(SecretContext()) == "context-secret"
+
+
 def test_manual_model_and_reasoning_are_preserved():
     result = call(user_model=True, user_reasoning=True,
                   model="gpt-6-sol", reasoning_config={"effort": "medium"})
@@ -67,6 +297,7 @@ def test_persistent_manual_effort_mode_keeps_profile_effort():
     result = call(ctx=Config(effort_mode="manual"))
     assert result["model"] == "gpt-6-luna"
     assert result["reasoning_effort"] is None
+    assert result["preserve_reasoning"] is True
     assert result["metadata"]["reasoning_effort"] == "medium"
     assert result["metadata"]["owner"] == {"model": "router", "reasoning": "user"}
 
@@ -86,7 +317,7 @@ def test_failures_preserve_defaults(monkeypatch, failure):
     assert result["metadata"]["status"] == "unrouted/default"
 
 
-def test_status_reports_saved_binding(monkeypatch):
+def test_saved_status_parser_preserves_binding(monkeypatch):
 
     class DB:
         def __init__(self, read_only):
@@ -103,9 +334,10 @@ def test_status_reports_saved_binding(monkeypatch):
             pass
 
     monkeypatch.setattr(router, "_session_record", lambda: DB(True).get_session("route-1"))
-    result = router.status()
-    assert "gpt-6-luna (router)" in result
-    assert "low (router)" in result
+    result = router._saved_status()['route']
+    assert result['model'] == 'gpt-6-luna'
+    assert result['reasoning_effort'] == 'low'
+    assert result['owner'] == {'model': 'router', 'reasoning': 'router'}
 
 
 def test_timeout_and_other_provider_leave_defaults(monkeypatch):
@@ -133,6 +365,7 @@ def test_jev_failure_retains_manual_field_ownership(monkeypatch):
     result = call(user_model=True, user_reasoning=True,
                   model="gpt-6-sol", reasoning_config={"effort": "high"})
     assert result["metadata"]["owner"] == {"model": "user", "reasoning": "user"}
+    assert result["preserve_reasoning"] is True
     assert result["metadata"]["model"] == "gpt-6-sol"
     assert result["metadata"]["reasoning_effort"] == "high"
 
@@ -214,21 +447,20 @@ def test_timed_out_workers_are_bounded_and_recover(monkeypatch):
 
 
 def test_http_payload_is_bounded_and_secrets_only_in_header(monkeypatch):
-    import httpx
     seen = []
-    def handler(request):
+    def open_url(request, _timeout):
         seen.append(request)
-        return httpx.Response(200, json={'answers': {}})
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        monkeypatch.setattr(httpx, 'stream', client.stream)
-        REAL_DECIDE('x' * 2000, 'synthetic-key', 'https://api.typesafe.ai/v1/systemone', 'jev-latest')
+        return FakeHTTPResponse(b'{"answers": {}}', url=request.full_url)
+    monkeypatch.setattr(router, '_open_url', open_url)
+    REAL_DECIDE('x' * 2000, 'synthetic-key', 'https://api.typesafe.ai/v1/systemone', 'jev-latest')
     import json
-    body = json.loads(seen[0].content)
+    body = json.loads(seen[0].data)
     assert len(body['state']) == 1200
     assert set(body) == {'state', 'model', 'questions'}
     assert set(body['questions']) == {'model_tier', 'effort_tier'}
-    assert 'synthetic-key' not in seen[0].content.decode()
-    assert seen[0].headers['authorization'] == 'Bearer synthetic-key'
+    assert 'synthetic-key' not in seen[0].data.decode()
+    assert seen[0].get_header('Authorization') == 'Bearer synthetic-key'
+    assert seen[0].get_header('Content-type') == 'application/json'
 
 
 def test_http_rejects_insecure_endpoints_before_transmission():
@@ -237,11 +469,26 @@ def test_http_rejects_insecure_endpoints_before_transmission():
 
 
 def test_http_limits_response_size(monkeypatch):
-    import httpx
-    with httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b'x'*100))) as client:
-        monkeypatch.setattr(httpx, 'stream', client.stream)
-        with pytest.raises(ValueError, match='size limit'):
-            router._request('GET', 'https://example.com', headers={}, limit=10)
+    monkeypatch.setattr(
+        router, '_open_url',
+        lambda request, timeout: FakeHTTPResponse(b'x' * 100, url=request.full_url),
+    )
+    with pytest.raises(ValueError, match='size limit'):
+        router._request('GET', 'https://example.com', headers={}, limit=10)
+
+
+def test_http_rejects_downgrade_redirect(monkeypatch):
+    monkeypatch.setattr(
+        router, '_open_url',
+        lambda request, timeout: FakeHTTPResponse(b'{}', url='http://example.com/redirected'),
+    )
+    with pytest.raises(ValueError, match='redirected outside HTTPS'):
+        router._request('GET', 'https://example.com', headers={})
+
+
+def test_http_response_rejects_redirect_status():
+    with pytest.raises(RuntimeError, match='HTTP 302'):
+        router._Response(302, b'').raise_for_status()
 
 
 @pytest.mark.parametrize('manual_mode', [False, True])
@@ -267,7 +514,8 @@ def test_disabled_reasoning_status_is_not_profile_default(monkeypatch):
         'model': 'gpt-6-luna', 'model_config': {
             'reasoning_config': {'enabled': False},
             'session_route': {'owner': {'reasoning': 'user'}}}})
-    assert 'Effort: none (user)' in router.status()
+    assert router._saved_status()['route']['reasoning_effort'] == 'none'
+    assert router._saved_status()['route']['owner']['reasoning'] == 'user'
 
 
 @pytest.mark.parametrize('returned_model', [

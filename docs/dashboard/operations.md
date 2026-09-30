@@ -9,7 +9,7 @@ python -m jevgauge dashboard --home /path/to/hermes-home --demo --port 8766 --op
 
 The first command shows captured evidence. The second explicitly selects synthetic demo events, does not read or write the live event database, and keeps configuration edits in memory. Demo data is not historical activity. The service binds only to `127.0.0.1`; there is no public bind option.
 
-In an installed, integrated Hermes instance, use `/jev-dashboard`. The plugin uses its supported command registration API, starts the dashboard with the interpreter recorded during installation, checks the loopback service identity, then opens the system browser. A conflicting port or failed startup returns a diagnostic instead of a success claim. See integration verification for controlled test evidence. Stock Hermes still requires the explicit pinned integration patch.
+In an installed, compatible Hermes instance, use `/jev-dashboard`. The plugin uses its supported command registration API, starts the dashboard with the interpreter recorded during installation, checks the loopback service identity, then opens the system browser. A conflicting port or failed startup returns a diagnostic instead of a success claim. See integration verification for controlled test evidence. Automatic ordinary-composer routing still requires the native integration.
 
 ## Configuration
 

@@ -47,7 +47,7 @@ Screenshots were captured independently for the approved V5 HTML and implementat
 ## Operational boundaries
 
 - Loopback Host/Origin validation, write token protection, bounded headers/body/filter/history processing, explicit error states, private storage creation, and no external ingestion endpoint were inspected.
-- The installed plugin launches the dashboard interpreter captured at installation. Its health check verifies live mode and home identity before claiming opening. Stock Hermes still needs the explicit pinned development integration; no upstream-release claim is made.
+- The installed plugin launches the dashboard interpreter captured at installation. Its health check verifies live mode and home identity before claiming opening. Compatible stock Hermes supports explicit routed starts. Automatic ordinary-composer routing still needs the native integration.
 - Disabling the plugin unloads its commands after restart. `/jev-dashboard` then requires re-enabling the installed plugin, or the dashboard can be started directly by CLI. The registration unit test does not prove commands survive unloading.
 - Production storage and demo source are separate. No real home, paid provider call, API credential, prompt retention, or historical import was required for this review.
 - Browser launch dispatch in the controlled Hermes integration uses a browser-launcher stub that records the URL. Real browser rendering is tested separately with Chrome. The combination does not constitute a live signed-in Desktop/provider trial.

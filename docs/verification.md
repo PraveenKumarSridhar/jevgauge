@@ -87,3 +87,33 @@ The tested upstream pin `d0288be5b3330d2442e3907185b8e9d0958297bb` still matched
 ## What is not established
 
 Live Desktop/provider execution on Linux or Windows, arbitrary Hermes versions, every account/model entitlement, named sibling profiles, routing-quality gains, subscription quota savings, and absence of all defects. A token count is not a measurement of subscription quota use.
+
+## Update resilience diagnostic worktree, 2026-09-26
+
+The new `/jev-status` command diagnoses the loaded process contract. It intentionally withholds profile enablement and saved bindings because Hermes's command callback does not attest the owning profile. Capability availability is not provider execution evidence. Native titlebar restoration and update admission remain unimplemented.
+
+Validation in isolated worktree:
+
+- Project baseline: 179 passed. Initial health regressions: 15 failed before implementation.
+- Astra review corrections: four additional regressions failed before fixes. Full suite: 198 passed on Python 3.11.15, pytest 8.4.2.
+- Actual Hermes `command.dispatch` and `slash.exec` handlers: 2 passed through the canonical runner on a disposable patched copy of Hermes commit `959c7649fd806c3996cdd845ee4bd4e0eb1a0276`. Each test uses two disposable homes, opposite configured enablement, identical stored session IDs and distinct model labels. Both paths visibly decline profile-specific claims and never call settings/storage readers. Plugin discovery is substituted with the registered test callback. These checks do not prove addressed profile lookup works; they prove it is declined.
+- Host test environment: Python 3.11.15, pytest 9.1.1. The production managed Python 3.14 environment, live Desktop, provider execution, and future Hermes versions were not validated here.
+- One host harness attempt failed because the canonical runner strips custom environment variables. The fixture was corrected to copy the isolated source beside the test. No product behavior was changed for that harness failure.
+
+To reproduce the host boundary test, copy `integration/tests/test_jev_status_scope.py` to an isolated Hermes checkout's `tests/tui_gateway/`, and copy `jev-router/__init__.py` beside it as `jev_router_scope_source.py`. Track the test in that disposable checkout for canonical discovery, then run:
+
+```sh
+HERMES_PYTHON=/path/to/hermes/python scripts/run_tests.sh -j 1 --file-retries 0 tests/tui_gateway/test_jev_status_scope.py
+```
+
+No live symlink, backend, app bundle, updater or credentials were changed.
+
+### Live restoration completed later on 2026-09-26
+
+The earlier isolated-only status above was superseded for the backend and native display by a later live restoration on this Mac. Current new-chat routing and cold resume were verified in Desktop against actual provider request logs. The new process-only slash-command code was still isolated at that point, and automatic protection against backend resets was still pending.
+
+### Owned package activation completed afterward
+
+The later owned plugin migration superseded the isolated slash-command and development-symlink status above. The process-only diagnostic was deployed, installed telemetry took precedence over editable packages, and the plugin ran from owned files with a separate wheel-installed dashboard environment. All 202 project tests passed at that point, including four telemetry-origin regressions.
+
+Cold-start acceptance exposed a Hermes PM/source-completion cycle. A single normal CLI completion with Desktop closed successfully rebuilt and installed the app; no source pull/reset or manual marker removal was performed. Exact plugin/config/UI bytes survived. Both fresh routing and cold resume then reached `gpt-6-luna / low` according to independent provider logs. The app-replacement check is now a live observation, but automatic survival of the backend hook across source resets and future releases remains incomplete.

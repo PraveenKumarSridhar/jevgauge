@@ -27,3 +27,7 @@ Both typed confidence values must be finite numbers within [0.55, 1]. Strings, b
 `TYPESAFE_API_KEY` is read through Hermes secret scope, not config.yaml. Never include credentials in endpoint URLs. Endpoints must use HTTPS; redirects are not automatically followed.
 
 Changes to policy or enabled state require restarting Desktop. Saved conversations retain their binding. The panel's Minimize/Details preference is separate and applies immediately.
+
+## Hermes compatibility and update checks
+
+Release refs, test runtimes, required APIs, patch order, fixtures and validation gates live in `integration/compatibility.json`, separately from routing policy. See [update compatibility](update-compatibility.md). The checker never switches the live installation; its retention setting records the intended future activation policy.

@@ -5,16 +5,20 @@ Use `python -m jevgauge --help` for arguments. Every command accepts `--home`; d
 | Command | Effect |
 |---|---|
 | doctor | Read source API/config shape; no network, credential reads, or writes |
-| install | Validate compatibility, copy packaged plugin, write owned-file hashes, enable |
+| install | Validate compatibility, copy packaged backend and native Desktop indicator, write owned-file hashes, enable backend |
 | enable | Validate compatibility and owned files, enable new routing |
 | disable | Disable future decisions; works without a compatible checkout |
-| uninstall | Disable, remove unchanged owned files; preserve other settings/files |
+| uninstall | Disable, remove unchanged owned backend and Desktop files; preserve other settings/files |
 
-Close Desktop and other processes editing Hermes config before mutations. A lock serializes JevGauge installers, not other applications. YAML comments/formatting normalize; unrelated values are retained. Config writes are atomic. An interrupted install may leave a disabled managed copy that can be safely installed again. Never remove a stale lock until you confirm no installer is running.
+Close Desktop and other processes editing Hermes config before mutations. The installer rereads the current config immediately before its field-scoped change and shares Hermes's cross-process plugin-settings lock. Some host configuration writers use a different process-local lock, so closing them is still required. YAML comments/formatting normalize; unrelated values are retained. Config writes are atomic. An interrupted install may leave a disabled managed copy that can be safely installed again. Never remove a stale lock until you confirm no installer is running.
 
 When cache or user files remain after uninstall, a small ownership record remains with them. Reinstall uses that record to restore only the managed files. Modified managed files are still refused. Python caches are preserved; the restored source timestamp changes so a same-size upgrade cannot execute stale bytecode.
 
 Existing plugin symlinks or unmanaged directories are refused. For development symlinks, keep the symlink and configure the plugin manually, or back it up and move it aside before managed installation. There is intentionally no force-overwrite flag.
+
+The native indicator is installed in `<home>/desktop-plugins/jev-router/plugin.js`. Enable **Jev routing** separately in Desktop Capabilities → Plugins. The backend also ships a profile-scoped `/api/plugins/jev-router/route` endpoint under its owned `dashboard/` directory. An exact manually installed Desktop copy is adopted without replacement; a different or edited copy is refused. Legacy JevGauge ownership manifests can be removed and upgraded without touching unknown files. Desktop removal writes an owned tombstone before deleting code, so an interrupted uninstall can be retried. The installer accepts the stock routed-session seam, the native `turn_route` plus `session.turn_route.read` contract, or the pinned legacy runtime-selection contract. It refuses unsupported hosts before writing either plugin.
+
+Installation marks Jev as requiring update admission in Hermes config and ships `requires_host_contracts: {desktop.plugin_routed_session: 1}` in the plugin manifest. A Hermes build containing the generic admission gate will refuse an incompatible Git or ZIP candidate before replacing the live checkout. Current official Hermes releases do not contain that gate, so this setting becomes enforceable only after the host change ships.
 
 ## Clean wheel smoke
 
@@ -27,9 +31,9 @@ This creates an isolated environment and a temporary home with spaces in the pat
 
 ## Troubleshooting
 
-- **Missing API marker:** the checkout is stock or unsupported. Follow the explicit integration guide. Adding only the marker is not integration.
-- **No panel:** confirm both the GUI and backend came from the integrated checkout, then start a new eligible chat.
+- **Missing routing contract:** the checkout is unsupported. Use a Hermes release that provides the routed-session seam or the native route contract. Adding only a marker is not integration.
+- **No indicator:** confirm the Desktop plugin is enabled, the backend contract passes `doctor`, and the GUI and backend use the same checkout. Then start a new eligible chat.
 - **Defaults retained:** check `/jev-status`. Typical causes: missing TypeSafe key, no account candidates, timeout, or confidence below threshold.
-- **Nothing routes:** check enabled list + plugin setting, launch profile, `openai-codex`, and whether this is already an existing conversation.
+- **Nothing routes:** check the enabled list, plugin setting, `openai-codex`, and whether this is already an existing conversation. Legacy integration is limited to the launch profile.
 - **Changed managed files:** back up/move the directory. Uninstall will not delete local modifications.
 - **Auth works in a terminal but not Desktop:** ensure the key is in the Hermes launch home's secret environment. Shell-only exports may not reach GUI launches.

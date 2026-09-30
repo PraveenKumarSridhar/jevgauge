@@ -4,6 +4,10 @@ description: Session-scoped Desktop model and reasoning router using TypeSafe Je
 provides_hooks:
   - select_session_runtime
   - provider_attempt
+provides_middleware:
+  - turn_route
+requires_host_contracts:
+  desktop.plugin_routed_session: 1
 config_schema:
   enabled:
     type: bool

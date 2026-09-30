@@ -223,19 +223,6 @@ index 90c095df..6463843e 100644
      retry_count += 1
      elapsed_time = time.time() - api_start_time
      # Liveness/watchdog label only (never shown in chat), so the classifier's
-diff --git a/agent/turn_response_check.py b/agent/turn_response_check.py
-index e762c488..2bbb8dec 100644
---- a/agent/turn_response_check.py
-+++ b/agent/turn_response_check.py
-@@ -149,6 +149,8 @@ def check_api_response(
- 
-     agent._turn_received_provider_response = True
-     finish_reason = _derive_finish_reason(agent, response, messages)
-+    if isinstance(provisional := getattr(agent, "_session_route_fallback", None), dict):
-+        provisional["settle"]()
- 
-     # HTTP-200 refusals are deterministic: one fallback try, else return the refusal.
-     if finish_reason == "content_filter":
 diff --git a/apps/desktop/src/app/chat/index.tsx b/apps/desktop/src/app/chat/index.tsx
 index d4852865..6d890ead 100644
 --- a/apps/desktop/src/app/chat/index.tsx
@@ -1469,69 +1456,6 @@ index dc2ae3f3..c9b3014c 100644
      except Exception:
          if records_composer_override:
              if had_composer_profile:
-@@ -344,12 +393,62 @@ def _apply_model_switch(
-         persist_model_selection(result)
-     if reasoning_effort:
-         _apply_switch_reasoning(sid, session, agent, reasoning_effort, persist_global=persist_global, one_turn=one_turn)
-+    if not one_turn and isinstance(session.get("session_route"), dict):
-+        if agent is None:
-+            _finish_deferred_route_switch(sid, session, result, reasoning_override)
-+        else:
-+            _persist_live_session_runtime(session)
-+            _emit_session_info(sid, session)
-     return {
-         "value": result.new_model, "warning": result.warning_message or "",
-         "confirm_required": False,
-         "scope": "once" if one_turn else ("global" if persist_global else "session")}
- 
- 
-+def _finish_deferred_route_switch(sid: str, session: dict, result, reasoning_override) -> None:
-+    """Keep the cold-resume build, saved binding, and panel on the same permanent pair."""
-+    _invalidate_session_route_fallback(session)
-+    reasoning = copy.deepcopy(reasoning_override if reasoning_override is not None
-+                              else _load_reasoning_config(result.new_model))
-+    session["create_reasoning_override"] = reasoning
-+    model_override = {"model": result.new_model, "provider": result.target_provider,
-+                      "base_url": result.base_url, "api_key": result.api_key, "api_mode": result.api_mode}
-+    session["model_override"] = model_override
-+    if isinstance(session.get("resume_runtime_overrides"), dict):
-+        session["resume_runtime_overrides"].update(
-+            model_override=model_override, provider_override=result.target_provider,
-+            reasoning_config_override=reasoning)
-+    route = session["session_route"]
-+    route.update(model=result.new_model, provider=result.target_provider, reasoning_effort=_switch_effort(reasoning))
-+    owners = route.setdefault("owner", {})
-+    owners["model"] = "user"
-+    if reasoning_override is None:
-+        owners["reasoning"] = "default"
-+    _publish_deferred_route_runtime(sid, session)
-+
-+
-+def _publish_deferred_route_runtime(sid: str, session: dict) -> None:
-+    """Publish a deferred routed binding after either model or reasoning changes."""
-+    route = session["session_route"]
-+    # Persist an existing conversation, but never turn a draft into a saved empty chat.
-+    if key := session.get("session_key"):
-+        db, owns_db = _profile_session_db(session.get("profile_home"))
-+        try:
-+            if db is not None and (row := db.get_session(key)):
-+                old = _parse_model_config(row.get("model_config"))
-+                # Sparse serialization omits cleared runtime fields. Remove the prior
-+                # binding first so an empty new endpoint/effort cannot revive on resume.
-+                for field in ("model", "provider", "base_url", "api_mode", "reasoning_config"):
-+                    old.pop(field, None)
-+                model, config = _workdir_row_model_config(session)
-+                db.update_session_meta(key, json.dumps({**old, **config}), model)
-+        finally:
-+            if owns_db:
-+                _release_db(db)
-+    _emit("session.info", sid, {"session_route": copy.deepcopy(route), "model": route.get("model") or "",
-+                                "provider": route.get("provider") or "", "reasoning_effort": route.get("reasoning_effort") or ""})
-+
-+
- def _apply_switch_reasoning(sid: str, session, agent, effort: str, *, persist_global: bool, one_turn: bool) -> None:
-     """``/model X --reasoning <level>``: the effort rides with the pick and shares its scope. Runs
-     AFTER ``agent.switch_model`` (which re-resolves ``reasoning_config`` from config.yaml, so an
 @@ -363,6 +462,11 @@ def _apply_switch_reasoning(sid: str, session, agent, effort: str, *, persist_gl
          agent.reasoning_config = parsed
      if one_turn or not isinstance(session, dict):
@@ -1587,18 +1511,7 @@ diff --git a/tui_gateway/server.py b/tui_gateway/server.py
 index 3aabe999..3d085c1e 100644
 --- a/tui_gateway/server.py
 +++ b/tui_gateway/server.py
-@@ -1106,6 +1106,10 @@ def _start_agent_build(sid: str, session: dict) -> None:
-     if session.get("lazy") and _child_run_active(str(session.get("session_key") or "")):
-         return
-     with session.setdefault("agent_build_lock", threading.Lock()):
-+        if _session_source(session) == "desktop" and not session.get("profile_home") and not session.get("history"):
-+            from hermes_cli.plugins import has_hook
-+            if not session.get("first_prompt_route_checked") and has_hook("select_session_runtime"):
-+                return
-         if ready.is_set() or session.get("agent_build_started"):
-             return
-         session["agent_build_started"] = True
-@@ -1164,6 +1168,178 @@ def _start_agent_build(sid: str, session: dict) -> None:
+@@ -1164,6 +1168,216 @@ def _start_agent_build(sid: str, session: dict) -> None:
      build_thread.start()
  
  
@@ -1617,12 +1530,29 @@ index 3aabe999..3d085c1e 100644
 +        from hermes_cli.plugins import has_hook, invoke_hook
 +        if not has_hook("select_session_runtime"):
 +            return
++        progress_lock = threading.Lock()
++        selection_open = True
++        reserved = {"status", "owner", "model", "provider", "reasoning_effort", "original_runtime"}
++
++        def annotations(metadata):
++            return {key: value for key, value in metadata.items() if key not in reserved}
++
++        def publish_route(route):
++            session["session_route"] = route
++            if sid:
++                _emit("session.info", sid, {"session_route": route.copy(), "running": True})
++
 +        def report_status(metadata):
 +            if not isinstance(metadata, dict):
 +                return
-+            session["session_route"] = dict(metadata)
-+            if sid:
-+                _emit("session.info", sid, {"session_route": dict(metadata), "running": True})
++            with progress_lock:
++                if not selection_open:
++                    return
++                publish_route({**annotations(metadata), "status": "selecting",
++                               "owner": {"model": "user" if user_model else "default",
++                                         "reasoning": "user" if user_reasoning else "default"},
++                               "model": current_model, "provider": current_provider,
++                               "reasoning_effort": _switch_effort(current_reasoning)})
 +
 +        with _session_profile_runtime_scope(session):
 +            current_model = str((session.get("model_override") or {}).get("model") or _resolve_model())
@@ -1635,12 +1565,20 @@ index 3aabe999..3d085c1e 100644
 +                current_reasoning is not None and current_reasoning != profile_reasoning))
 +            if current_reasoning is None:
 +                current_reasoning = profile_reasoning
-+            results = invoke_hook(
-+                "select_session_runtime", message=text, session_key=session.get("session_key"),
-+                source="desktop", provider=current_provider, model=current_model,
-+                reasoning_config=current_reasoning,
-+                user_model=bool(session.get("model_override")), user_reasoning=user_reasoning,
-+                report_status=report_status)
++            user_model = bool(session.get("model_override"))
++            try:
++                results = invoke_hook(
++                    "select_session_runtime", message=text, session_key=session.get("session_key"),
++                    source="desktop", provider=current_provider, model=current_model,
++                    reasoning_config=current_reasoning,
++                    user_model=user_model, user_reasoning=user_reasoning,
++                    report_status=report_status)
++            except Exception:
++                logger.exception("session runtime selector failed")
++                results = []
++            finally:
++                with progress_lock:
++                    selection_open = False
 +        for result in results:
 +            if not isinstance(result, dict):
 +                continue
@@ -1648,14 +1586,20 @@ index 3aabe999..3d085c1e 100644
 +            if not isinstance(metadata, dict):
 +                continue
 +            model, provider, effort = result.get("model"), result.get("provider"), result.get("reasoning_effort")
-+            if model is not None and (not isinstance(model, str) or not model.strip() or not isinstance(provider, str)):
++            preserve_reasoning = result.get("preserve_reasoning", False)
++            if type(preserve_reasoning) is not bool or (preserve_reasoning and effort is not None):
++                continue
++            if model is not None and (not isinstance(model, str) or not model.strip() or
++                                      not isinstance(provider, str) or not provider.strip()):
 +                continue
 +            if effort is not None:
 +                from hermes_constants import parse_reasoning_effort
 +                if not isinstance(effort, str) or parse_reasoning_effort(effort) is None:
 +                    continue
-+            effective_model = model if model and not session.get("model_override") else current_model
-+            effective_provider = provider if model and not session.get("model_override") else current_provider
++            routed_model = bool(model and not user_model)
++            routed_reasoning = bool(effort and not user_reasoning)
++            effective_model = model if routed_model else current_model
++            effective_provider = provider if routed_model else current_provider
 +            effective_effort = effort if effort and not user_reasoning else _switch_effort(current_reasoning)
 +            if model:
 +                from hermes_cli.models_validate import static_model_provider_conflict
@@ -1665,30 +1609,37 @@ index 3aabe999..3d085c1e 100644
 +                from agent.reasoning_effort import route_supported_efforts
 +                if effective_effort not in route_supported_efforts(effective_provider, effective_model):
 +                    continue
-+            if model and not session.get("model_override"):
++            if routed_model:
 +                session["model_override"] = {"model": model, "provider": provider}
-+            if effort and not user_reasoning:
++            if routed_reasoning:
 +                session["create_reasoning_override"] = parse_reasoning_effort(effort)
-+            if metadata.get("status") == "routed":
++            selected = routed_model or routed_reasoning
++            if selected:
 +                original = {"model": current_model, "provider": current_provider,
 +                            "reasoning_config": current_reasoning}
 +                session["route_fallback"] = original
-+                metadata["original_runtime"] = original
-+            metadata = {**metadata, "model": effective_model, "provider": effective_provider,
-+                        "reasoning_effort": effective_effort}
-+            report_status(metadata)
++            route = {**annotations(metadata), "status": "routed" if selected else "unrouted/default",
++                     "owner": {"model": "user" if user_model else "router" if routed_model else "default",
++                               "reasoning": "user" if user_reasoning or preserve_reasoning else "router" if routed_reasoning else "default"},
++                     "model": effective_model, "provider": effective_provider,
++                     "reasoning_effort": effective_effort}
++            if selected:
++                route["original_runtime"] = original
++            publish_route(route)
 +            logger.info("session route %s: status=%s model=%s provider=%s effort=%s",
-+                        session.get("session_key"), metadata.get("status"),
++                        session.get("session_key"), route["status"],
 +                        (session.get("model_override") or {}).get("model") or current_model,
 +                        (session.get("model_override") or {}).get("provider") or current_provider,
 +                        (session.get("create_reasoning_override") or {}).get("effort") or "default")
 +            break
 +        else:
-+            if (session.get("session_route") or {}).get("status") == "selecting":
-+                report_status({**session["session_route"], "status": "unrouted/default",
-+                               "reason": "No valid routing decision", "model": current_model,
-+                               "provider": current_provider,
-+                               "reasoning_effort": _switch_effort(current_reasoning)})
++            prior = session.get("session_route") or {}
++            publish_route({**annotations(prior), "status": "unrouted/default",
++                           "reason": "No valid routing decision",
++                           "owner": {"model": "user" if user_model else "default",
++                                     "reasoning": "user" if user_reasoning else "default"},
++                           "model": current_model, "provider": current_provider,
++                           "reasoning_effort": _switch_effort(current_reasoning)})
 +
 +
 +def _arm_first_call_route_fallback(session: dict, agent, sid: str = "") -> None:
@@ -1777,7 +1728,7 @@ index 3aabe999..3d085c1e 100644
  def _sess_nowait(params, rid):
      sid = params.get("session_id") or ""
      s = _sessions.get(sid)
-@@ -1651,6 +1827,8 @@ def _persist_live_session_runtime(session: dict | None) -> None:
+@@ -1651,6 +1865,8 @@ def _persist_live_session_runtime(session: dict | None) -> None:
              model_config["composer_override_profile"] = composer_profile
          elif "composer_override_profile" in session:
              model_config.pop("composer_override_profile", None)
@@ -1786,7 +1737,7 @@ index 3aabe999..3d085c1e 100644
          if (tier_override := session.get("create_service_tier_override")) is not None:
              # agent.service_tier is None for explicit normal; without this the distinction is erased on every persist.
              model_config["service_tier"] = tier_override or "normal"
-@@ -2256,6 +2434,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
+@@ -2256,6 +2472,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
          "usage": _session_usage_snapshot(session),
          "profile_name": profile_name_for_home(sess.get("profile_home")) or _current_profile_name(),
      }
@@ -1795,7 +1746,7 @@ index 3aabe999..3d085c1e 100644
      with contextlib.suppress(Exception):
          from hermes_cli import __release_date__
          from hermes_cli.version_info import get_version_info
-@@ -2747,6 +2927,14 @@ def _schedule_agent_build(sid: str, delay: float = 0.05) -> None:
+@@ -2747,6 +2965,14 @@ def _schedule_agent_build(sid: str, delay: float = 0.05) -> None:
  
      def _run():
          if (session := _sessions.get(sid)) is not None:

@@ -16,7 +16,7 @@ class Config:
 
 def test_route_captures_original_and_eligible_without_prompt(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
-    monkeypatch.setattr(router, '_get_secret', lambda: 'secret-key')
+    monkeypatch.setattr(router, '_get_secret', lambda *_args: 'secret-key')
     monkeypatch.setattr(router, '_live_models', lambda: ['gpt-6-luna', 'gpt-6-sol'])
     monkeypatch.setattr(router, '_supported_efforts', lambda *a: ['low'])
     monkeypatch.setattr(router, '_decide', lambda *a: {'answers': {'model_tier': {'choice':'economical','confidence':.9}, 'effort_tier': {'choice':'low','confidence':.9}}})
@@ -58,7 +58,7 @@ def test_dashboard_registration_available_when_routing_disabled():
 
 def test_confidence_abstention_keeps_observed_eligibility(tmp_path, monkeypatch):
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
-    monkeypatch.setattr(router, '_get_secret', lambda: 'synthetic')
+    monkeypatch.setattr(router, '_get_secret', lambda *_args: 'synthetic')
     monkeypatch.setattr(router, '_live_models', lambda: ['gpt-6-sol'])
     monkeypatch.setattr(router, '_decide', lambda *a: {'answers': {'model_tier':{'choice':'balanced','confidence':.1}, 'effort_tier':{'choice':'low','confidence':.9}}})
     router.route(ctx=Config(), source='desktop', session_key='chat', message='PRIVATE', provider='openai-codex', model='original', reasoning_config={}, user_model=False, user_reasoning=False)

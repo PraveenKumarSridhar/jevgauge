@@ -33,6 +33,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--wheel', type=Path, required=True)
     parser.add_argument('--hermes-repo', type=Path, required=True)
+    parser.add_argument('--stock-ref', default='HEAD',
+                        help='Unmodified Hermes commit to use for the unsupported-host refusal check')
     args = parser.parse_args(argv)
     wheel, repo = args.wheel.resolve(strict=True), args.hermes_repo.resolve(strict=True)
     if wheel.suffix != '.whl':
@@ -85,6 +87,11 @@ finally:
         original = "{'model':'original','private_setting':'fixture-only','plugins':{'enabled':['other'],'entries':{'other':{'settings':{'keep':True}}}}}"
         for action in ('doctor', 'install', 'install', 'disable', 'enable', 'uninstall', 'install', 'disable', 'uninstall'):
             run([python, '-m', 'jevgauge', action, '--hermes-repo', repo], env=environment, cwd=workspace)
+            desktop_source = home / 'desktop-plugins/jev-router/plugin.js'
+            if action == 'install':
+                assert b'Jev:' in desktop_source.read_bytes()
+            if action == 'uninstall':
+                assert not desktop_source.exists()
             if action in ('install', 'enable', 'disable'):
                 enabled = action != 'disable'
                 assertion = f'''from pathlib import Path
@@ -111,6 +118,7 @@ assert list(Path({str(installed_source.parent)!r}).glob('__pycache__/__init__.*.
             print(f'PASS wheel {action}')
         run([python, '-c', f'import yaml; from pathlib import Path; assert yaml.safe_load(Path({str(config)!r}).read_text()) == {original}'], env=environment, cwd=workspace)
         assert not (home / 'plugins/jev-router/__init__.py').exists()
+        assert not (home / 'desktop-plugins/jev-router/plugin.js').exists()
         assert list((home / 'plugins/jev-router/__pycache__').glob('__init__.*.pyc'))
         # Build a read-only compatibility fixture from real modules, replacing
         # only plugins.py with committed HEAD (the local upstream base).
@@ -120,10 +128,11 @@ assert list(Path({str(installed_source.parent)!r}).glob('__pycache__/__init__.*.
             destination = upstream / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(repo / relative, destination)
-        committed = run(['git', '-C', repo, 'show', 'HEAD:hermes_cli/plugins.py'], env=environment, cwd=workspace).stdout
+        committed = run(['git', '-C', repo, 'show', f'{args.stock_ref}:hermes_cli/plugins.py'], env=environment, cwd=workspace).stdout
         (upstream / 'hermes_cli/plugins.py').write_text(committed, encoding='utf-8')
         result = run([python, '-m', 'jevgauge', 'install', '--hermes-repo', upstream], env=environment, cwd=workspace, expected=1)
-        assert 'upstream' in result.stderr and 'SESSION_RUNTIME_SELECTION_API' in result.stderr
+        assert 'turn_route' in result.stderr and 'SESSION_RUNTIME_SELECTION_API' in result.stderr
+        assert 'never patches Hermes' in result.stderr
         assert not (home / 'plugins/jev-router/__init__.py').exists()
         assert list((home / 'plugins/jev-router/__pycache__').glob('__init__.*.pyc'))
         print('PASS committed upstream API refuses unsupported installation')
